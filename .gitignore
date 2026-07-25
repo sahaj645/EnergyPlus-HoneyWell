@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Node
+node_modules/
+dist/
+build/
+
+# EnergyPlus run artifacts
+*.eso
+*.mtr
+*.mtd
+*.rdd
+*.mdd
+*.bnd
+*.shd
+*.audit
+*.end
+*.err
+*.eio
+*.dxf
+*.svg
+Output/
+output/
+*.sql
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
