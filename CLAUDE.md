@@ -113,18 +113,51 @@ media/        demo video
   directory. `common/eplus_path.py` appends `$ENERGYPLUS_DIR` to `sys.path` at import time.
   Import it before anything that touches the runtime API. CI has no EnergyPlus, so nothing
   in the test suite may require it at import time.
-- **Current state: baseline pipeline landed; agent path still stubbed.** Implemented so far:
-  `simulation/fetch_assets.py` (asset acquisition, copies the prototype IDF from
-  `$ENERGYPLUS_DIR/ExampleFiles` or prints manual instructions), `simulation/run_baseline.py`
-  (runtime-API run, eppy RunPeriod/meter patching, hottest-week selection), and
-  `experiments/kpis.py` (KPI extraction from the E+ SQL: site kWh, itemised HVAC kWh, peak kW,
-  ToU ₹, kgCO2). This baseline run is the **experimental control** every A/B claim is measured
-  against. The agent, guardian, MCP and dashboard modules are still `NotImplementedError`
-  stubs by design — do not mistake a stub for a regression.
+- **Current state: baseline pipeline + closed loop landed; planner still stubbed.**
+  Implemented: `simulation/fetch_assets.py`, `simulation/run_baseline.py`,
+  `experiments/kpis.py` (the **experimental control** every A/B claim is measured against),
+  `simulation/prepare_idf.py`, `agent/bus.py`, `common/store.py`, `guardian/supervisor.py`
+  (first cut), and `experiments/smoke_roundtrip.py`. Still `NotImplementedError` stubs by
+  design: `agent/ollama_client.py`, `agent/digest.py`, `agent/plan_cache.py`,
+  `guardian/watchdog.py`, `guardian/fallback.py`, `mcp_server/*`, `dashboard/app.py`,
+  `experiments/{ab_harness,endurance,kpi_extract}.py`. Do not mistake a stub for a regression.
+
+### The runtime API bites in four specific places
+
+`agent/bus.py` exists to enforce these. Breaking any one fails silently, not loudly:
+
+1. `request_variable()` must be called for **every** output variable *before*
+   `run_energyplus()`. A handle for an unrequested variable is `-1` — no exception, no log —
+   and then reads as a plausible `0.0` for the rest of the run.
+2. No handle lookups until `api_data_fully_ready(state)`. Handles are stable afterwards, so
+   fetch once and cache; re-fetching per timestep is slow and pointless.
+3. Guard every read and write on `warmup_flag(state)`. Callbacks fire during warmup, those
+   values are not physical, and warmup writes are discarded.
+4. **PMV is keyed by the People object name, not the zone name.** Zone air temperature and
+   occupancy are keyed by zone. That asymmetry is why `PreparedModel` carries a zone→People
+   map instead of anyone guessing the key.
+
+### Setpoints are actuated through `Schedule:Constant`, not thermostat actuators
+
+`prepare_idf.py` rewrites each thermostat-referenced `Schedule:Compact` into a
+`Schedule:Constant` of the same name, so `Schedule:Constant / Schedule Value` is writable.
+Thermostat actuators vary by HVAC template and some prototypes expose none — a missing one is
+another silent `-1`. The cost: `agentic.idf` has **no daily setback profile left**, so it is
+*not* the A/B control arm. `baseline.idf` is.
+
+### Plans are anchored in simulation time
+
+`Plan.created_at` / `ApprovedPlan.approved_at` are wall-clock UTC; the simulation runs in
+simulation time. `PlanStep.offset_minutes` is measured from the sim time at which the bus
+*first saw that `plan_id`*, never from the wall clock. Mixing the two produces silent nonsense.
 - **`experiments/kpis.py` reads the EnergyPlus SQL; `experiments/kpi_extract.py` reads the HIVE
   telemetry DB.** Two different sources on purpose: the baseline has no agent and no HIVE DB,
   so its only truth is E+'s own `eplusout.sql`.
-- **`baseline.idf` / `weather.epw` are gitignored** — fetched per machine, never committed.
+- **`baseline.idf` / `weather.epw` / `agentic.idf` are gitignored** — built per machine, never
+  committed. `agentic_model.json` (the `PreparedModel` index) is written beside `agentic.idf`
+  and is what the bus loads; it is never re-derived by re-parsing the IDF.
+- **Order of operations:** `fetch_assets` → `prepare_idf` → `smoke_roundtrip` / agent runs.
+  `run_baseline` uses `baseline.idf` directly and does not need `prepare_idf`.
 - **The data in `data/` is representative, not authoritative.** Indian ToU tariff and grid
   carbon-intensity curves shaped for realistic behaviour (midday solar dip, dirty evening
   peak). Fine for optimisation and demos; do not present it as billing data.

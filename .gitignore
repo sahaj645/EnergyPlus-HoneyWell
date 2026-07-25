@@ -46,6 +46,8 @@ htmlcov/
 # --- EnergyPlus simulation assets (fetched, not committed: size + licensing) ---
 simulation/baseline.idf
 simulation/weather.epw
+simulation/agentic.idf
+simulation/agentic_model.json
 *.epw
 
 # --- EnergyPlus run artifacts ---

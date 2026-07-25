@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from enum import StrEnum
+from pathlib import Path
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -95,6 +96,10 @@ class ZoneState(_Base):
     occupancy: float | None = Field(default=None, ge=0)
     cooling_setpoint_c: float | None = None
     heating_setpoint_c: float | None = None
+    pmv: float | None = Field(
+        default=None,
+        description="Fanger PMV. Reported per People object, not per zone - see PreparedModel.",
+    )
 
 
 class BuildingState(_Base):
@@ -129,6 +134,66 @@ class KpiSnapshot(_Base):
     peak_demand_kw: float = Field(ge=0)
     comfort_violation_hours: float = Field(ge=0)
     unmet_load_hours: float = Field(default=0.0, ge=0)
+
+
+# --------------------------------------------------------------------------------------
+# Model wiring
+# --------------------------------------------------------------------------------------
+
+
+class ZoneBinding(_Base):
+    """How one zone is wired into the runtime API.
+
+    Two indirections that bite if you guess them:
+
+    * Setpoints are actuated through the **schedule** the thermostat references, not through a
+      thermostat actuator. ``simulation/prepare_idf.py`` rewrites those schedules to
+      ``Schedule:Constant`` so ``Schedule:Constant / Schedule Value`` is writable.
+    * Fanger PMV is reported keyed by the **People object name**, not the zone name. ``people``
+      is that key; without it there is no PMV for this zone.
+    """
+
+    zone: str
+    heating_schedule: str | None = None
+    cooling_schedule: str | None = None
+    people: str | None = None
+
+
+class PreparedModel(_Base):
+    """Index of an agent-ready IDF: written by ``prepare_idf``, read by the bus.
+
+    Persisted next to the IDF so the two stages stay decoupled - the bus never re-parses the
+    IDF, and a mismatch between them is a loud missing-key error rather than a silent -1
+    handle at timestep 4000.
+    """
+
+    idf_path: str
+    zones: list[ZoneBinding] = Field(default_factory=list)
+    constant_schedules: dict[str, float] = Field(
+        default_factory=dict,
+        description="Schedule:Constant name -> the baseline value prepare_idf initialised it to.",
+    )
+
+    def binding(self, zone: str) -> ZoneBinding | None:
+        """Return the binding for ``zone``, or ``None`` if the zone is not in the model."""
+        for item in self.zones:
+            if item.zone == zone:
+                return item
+        return None
+
+    @property
+    def zone_names(self) -> list[str]:
+        return [z.zone for z in self.zones]
+
+    def save(self, path: Path | str) -> Path:
+        out = Path(path)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(self.model_dump_json(indent=2), encoding="utf-8")
+        return out
+
+    @classmethod
+    def load(cls, path: Path | str) -> PreparedModel:
+        return cls.model_validate_json(Path(path).read_text(encoding="utf-8"))
 
 
 # --------------------------------------------------------------------------------------
@@ -215,7 +280,9 @@ __all__ = [
     "KpiSnapshot",
     "Plan",
     "PlanStep",
+    "PreparedModel",
     "Violation",
     "ViolationCode",
+    "ZoneBinding",
     "ZoneState",
 ]

@@ -42,8 +42,9 @@ class Settings(BaseModel):
     plan_interval_minutes: int = Field(default=15, gt=0)
 
     # --- telemetry ---
-    telemetry_batch_size: int = Field(default=500, gt=0)
-    telemetry_flush_seconds: float = Field(default=5.0, gt=0)
+    # Batching is counted in timesteps, not rows: one timestep emits one row per zone, and the
+    # flush trigger has to be tied to the callback's cadence to bound how much is at risk.
+    telemetry_flush_every_timesteps: int = Field(default=12, gt=0)
 
     # --- logging ---
     log_level: str = Field(default="INFO")
@@ -60,7 +61,6 @@ class Settings(BaseModel):
             ollama_model=_env("HIVE_OLLAMA_MODEL", "qwen2.5:7b-instruct-q4_K_M"),
             planner_timeout_s=float(_env("HIVE_PLANNER_TIMEOUT_S", "30")),
             plan_interval_minutes=int(_env("HIVE_PLAN_INTERVAL_MIN", "15")),
-            telemetry_batch_size=int(_env("HIVE_TELEMETRY_BATCH", "500")),
-            telemetry_flush_seconds=float(_env("HIVE_TELEMETRY_FLUSH_S", "5")),
+            telemetry_flush_every_timesteps=int(_env("HIVE_TELEMETRY_FLUSH_STEPS", "12")),
             log_level=_env("HIVE_LOG_LEVEL", "INFO"),
         )

@@ -23,6 +23,7 @@ PACKAGES = [
 
 # Modules that must import cleanly on a machine with no EnergyPlus and no model runtime.
 MODULES = [
+    "agent.bus",
     "agent.digest",
     "agent.ollama_client",
     "agent.plan_cache",
@@ -36,6 +37,7 @@ MODULES = [
     "experiments.endurance",
     "experiments.kpi_extract",
     "experiments.kpis",
+    "experiments.smoke_roundtrip",
     "guardian.fallback",
     "guardian.limits",
     "guardian.supervisor",
@@ -43,6 +45,7 @@ MODULES = [
     "mcp_server.server",
     "mcp_server.tools",
     "simulation.fetch_assets",
+    "simulation.prepare_idf",
     "simulation.run_baseline",
 ]
 
