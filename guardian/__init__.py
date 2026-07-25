@@ -8,4 +8,4 @@ It is also the *only* producer of :class:`common.models.ApprovedPlan`, which is 
 the actuator accepts (CLAUDE.md, rule R2). There is no bypass path, and none may be added.
 """
 
-__all__ = ["fallback", "limits", "supervisor", "watchdog"]
+__all__ = ["core", "executor", "fallback", "limits", "supervisor", "watchdog"]

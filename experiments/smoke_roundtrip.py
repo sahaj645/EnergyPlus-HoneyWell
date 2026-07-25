@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -38,7 +38,10 @@ from common import eplus_path
 from common.config import Settings
 from common.log import get_logger
 from common.models import Actuator, ApprovedPlan, BuildingState, Plan, PlanStep, PreparedModel
-from common.store import TelemetryStore, read_telemetry
+from common.planslot import PlanSlot
+from common.store import TelemetryStore, read_guardian_events, read_telemetry
+from guardian.core import Guardian as CoreGuardian
+from guardian.executor import Executor
 from guardian.supervisor import Guardian
 from simulation.receding import RecedingHorizonDriver
 from simulation.snapshots import SnapshotWriter, summarize
@@ -189,6 +192,67 @@ def build_dumb_plan(
         horizon_minutes=24 * 60,
         steps=steps,
         rationale=f"smoke test: +{delta_c} C cooling setback {start_hour}:00-{end_hour}:00",
+    )
+
+
+#: Setpoints the abusive plan asks for. Every one must be caught by the guardian.
+ABUSIVE_OCCUPIED_SETPOINT_C = 18.0  # below the occupied envelope -> clip
+ABUSIVE_JUMP_C = 5.0  # a 5 C instant move -> rate-limit
+
+
+def build_abusive_plan(model: PreparedModel, baseline_cooling_c: float) -> Plan:
+    """A hardcoded plan that violates all three guardian protections at once.
+
+    The three abuses the exit gate is watching for:
+
+    1. **An 18 C occupied cooling setpoint** - well below the occupied comfort envelope, so it
+       is clipped up to the band.
+    2. **A 5 C instant jump** - kept inside the band so the *rate limiter*, not the envelope, is
+       the binding constraint and its reason string is unambiguous.
+    3. **A non-whitelisted actuator** - stripped and logged. Note a *truly* bogus actuator
+       *name* cannot exist: ``PlanStep.actuator`` is a strict enum, so a malformed name fails at
+       plan construction. The expressible equivalent is an actuator that is valid but off the
+       guardian's whitelist (a fan fraction), which is exactly what the whitelist strips.
+    """
+    cooled = [b for b in model.zones if b.cooling_schedule]
+    if not cooled:
+        raise ValueError("no cooling-capable zone to abuse")
+
+    steps: list[PlanStep] = [
+        PlanStep(
+            offset_minutes=0,
+            zone=cooled[0].zone,
+            actuator=Actuator.COOLING_SETPOINT_C,
+            value=ABUSIVE_OCCUPIED_SETPOINT_C,
+        ),
+        PlanStep(
+            offset_minutes=0,
+            zone=cooled[0].zone,
+            actuator=Actuator.FAN_FLOW_FRACTION,  # off-whitelist -> stripped
+            value=0.95,
+        ),
+    ]
+
+    # If there is a second zone, give it a pure rate-limit case: a 5 C downward jump that stays
+    # inside the band, so only `rate:` fires there. With one zone, the 18 C step already
+    # exercises the rate limiter (18 is far more than 5 C from the ~24 C baseline).
+    jump_zone = cooled[-1]
+    if jump_zone.zone != cooled[0].zone:
+        jump_target = max(21.5, baseline_cooling_c - ABUSIVE_JUMP_C)
+        steps.append(
+            PlanStep(
+                offset_minutes=0,
+                zone=jump_zone.zone,
+                actuator=Actuator.COOLING_SETPOINT_C,
+                value=jump_target,
+            )
+        )
+
+    return Plan(
+        planner_model="hardcoded-abusive-plan",
+        horizon_minutes=24 * 60,
+        steps=steps,
+        rationale="guardian smoke: 18C occupied setpoint, 5C jump, off-whitelist actuator",
     )
 
 
@@ -372,6 +436,133 @@ def run_smoke(
     return evaluate_roundtrip(control, agent)
 
 
+@dataclass(frozen=True)
+class AbusiveResult:
+    """Exit-gate summary for the abusive-plan run."""
+
+    exit_code: int
+    timesteps: int
+    guardian_event_rows: int
+    saw_clip: bool
+    saw_rate: bool
+    saw_strip: bool
+    watchdog_trips: int
+
+    @property
+    def ok(self) -> bool:
+        return (
+            self.exit_code == 0
+            and self.timesteps > 0
+            and self.guardian_event_rows > 0
+            and self.saw_clip
+            and self.saw_rate
+            and self.saw_strip
+        )
+
+    def describe(self) -> str:
+        verdict = "PASS" if self.ok else "FAIL"
+        checks = [
+            ("sim completed (exit 0)", self.exit_code == 0),
+            (f"telemetry recorded ({self.timesteps} steps)", self.timesteps > 0),
+            (f"guardian_events rows ({self.guardian_event_rows})", self.guardian_event_rows > 0),
+            ("clip fired", self.saw_clip),
+            ("rate-limit fired", self.saw_rate),
+            ("strip fired", self.saw_strip),
+        ]
+        header = f"[{verdict}] abusive-plan guardian smoke  (watchdog trips: {self.watchdog_trips})"
+        lines = [header]
+        lines += [f"  {'ok ' if passed else 'XX '} {label}" for label, passed in checks]
+        return "\n".join(lines)
+
+
+def run_abusive(
+    settings: Settings | None = None,
+    *,
+    db_path: Path | None = None,
+    stream_limit: int = 24,
+) -> AbusiveResult:
+    """Run one simulated day driving the guardian executor with a deliberately abusive plan.
+
+    This is Session 4's exit gate: confirm by eye that clip, rate-limit and strip all fired,
+    the simulation completed, and ``guardian_events`` rows landed. Requires EnergyPlus and a
+    prepared IDF.
+    """
+    settings = settings or Settings.from_env()
+    eplus_path.require_energyplus()
+
+    index_path = settings.simulation_dir / "agentic_model.json"
+    if not index_path.is_file():
+        raise FileNotFoundError(
+            f"{index_path} not found. Run `python -m simulation.prepare_idf` first."
+        )
+    model = PreparedModel.load(index_path)
+
+    db_path = db_path or (settings.repo_root / "hive_abusive.sqlite")
+    if db_path.exists():
+        db_path.unlink()
+
+    run_id = "smoke-abusive"
+    plan = build_abusive_plan(model, _baseline_cooling(model))
+
+    slot = PlanSlot()
+    slot.commit(plan)
+    executor = Executor(
+        guardian=CoreGuardian(),
+        model=model,
+        plan_slot=slot,
+        plan_interval=timedelta(minutes=settings.plan_interval_minutes),
+        run_id=run_id,
+    )
+
+    with TelemetryStore(db_path, flush_every_timesteps=12) as store:
+        store.write_plan(plan, run_id=run_id)
+        bus = SimulationBus(
+            model=model,
+            store=store,
+            run_id=run_id,
+            epw_path=settings.epw_path,
+            out_dir=settings.simulation_dir / "out_smoke_abusive",
+        )
+        # The executor IS the actuator's hand: it reads the slot, filters through the guardian,
+        # and calls bus.write_setpoints. Wiring it as the plan_provider runs it inside the
+        # callback (the only callback-safe place), and it returns None so the bus does not
+        # double-write.
+        executor.control = bus
+        bus.plan_provider = executor.provide
+
+        exit_code = bus.run()
+
+        # Persist buffered guardian events AFTER the run - never on the callback path (R1).
+        executor.drain_events(store, run_id=run_id)
+
+    log.info(
+        "abusive run: exit=%s %s | bus %s",
+        exit_code,
+        executor.stats.summary(),
+        bus.stats.summary(),
+    )
+
+    # Print the verdict stream (the by-eye confirmation).
+    print(f"\n--- guardian verdict stream (first {stream_limit} clipped/stripped timesteps) ---")
+    for record in executor.verdict_log[:stream_limit]:
+        print(f"  {record.at:%H:%M} [{record.source}] " + " | ".join(record.reasons))
+    if not executor.verdict_log:
+        print("  (none - the guardian changed nothing, which for an abusive plan is a FAILURE)")
+
+    all_reasons = [reason for record in executor.verdict_log for reason in record.reasons]
+    rows = read_guardian_events(db_path, run_id=run_id)
+
+    return AbusiveResult(
+        exit_code=exit_code,
+        timesteps=bus.stats.timesteps,
+        guardian_event_rows=len(rows),
+        saw_clip=any(r.startswith("clip:") for r in all_reasons),
+        saw_rate=any(r.startswith("rate:") for r in all_reasons),
+        saw_strip=any(r.startswith("strip:") for r in all_reasons),
+        watchdog_trips=executor.stats.watchdog_trips,
+    )
+
+
 def parse_start(value: str) -> date:
     """Parse ``MM-DD`` into a date on the nominal non-leap calendar the RunPeriods use."""
     month, day = (int(part) for part in value.split("-", 1))
@@ -394,9 +585,20 @@ def main(argv: list[str] | None = None) -> int:
         help="MM-DD start date (receding mode only; live mode uses the IDF's RunPeriod)",
     )
     parser.add_argument("--days", type=int, default=1, help="days to simulate (receding mode)")
+    parser.add_argument(
+        "--abusive",
+        action="store_true",
+        help="drive the guardian executor with a hostile plan and print the verdict stream",
+    )
     args = parser.parse_args(argv)
 
     settings = Settings.from_env()
+
+    if args.abusive:
+        result = run_abusive(settings, db_path=Path(args.db) if args.db else None)
+        print("\n" + result.describe())
+        return 0 if result.ok else 1
+
     result = run_smoke(
         settings,
         db_path=Path(args.db) if args.db else None,
@@ -414,9 +616,12 @@ __all__ = [
     "SETBACK_DELTA_C",
     "SETBACK_END_HOUR",
     "SETBACK_START_HOUR",
+    "AbusiveResult",
     "RoundTripResult",
+    "build_abusive_plan",
     "build_dumb_plan",
     "evaluate_roundtrip",
+    "run_abusive",
     "run_smoke",
 ]
 

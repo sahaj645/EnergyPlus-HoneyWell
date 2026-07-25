@@ -113,13 +113,63 @@ media/        demo video
   directory. `common/eplus_path.py` appends `$ENERGYPLUS_DIR` to `sys.path` at import time.
   Import it before anything that touches the runtime API. CI has no EnergyPlus, so nothing
   in the test suite may require it at import time.
-- **Current state: baseline + closed loop + model-versioning landed; planner still stubbed.**
-  Implemented: `simulation/{fetch_assets,run_baseline,prepare_idf,idf_io,snapshots,patching,
-  receding}.py`, `agent/bus.py`, `common/store.py`, `guardian/supervisor.py` (first cut),
+- **Current state: baseline + closed loop + model-versioning + guardian landed; planner still
+  stubbed.** Implemented: `simulation/{fetch_assets,run_baseline,prepare_idf,idf_io,snapshots,
+  patching,receding}.py`, `agent/bus.py`, `common/{store,planslot}.py`,
+  `guardian/{core,executor,watchdog,fallback,supervisor,limits}.py`,
   `experiments/{kpis,smoke_roundtrip}.py`. Still `NotImplementedError` stubs by design:
-  `agent/ollama_client.py`, `agent/digest.py`, `agent/plan_cache.py`, `guardian/watchdog.py`,
-  `guardian/fallback.py`, `mcp_server/*`, `dashboard/app.py`,
-  `experiments/{ab_harness,endurance,kpi_extract}.py`. Do not mistake a stub for a regression.
+  `agent/ollama_client.py`, `agent/digest.py`, `agent/plan_cache.py`, `mcp_server/*`,
+  `dashboard/app.py`, `experiments/{ab_harness,endurance,kpi_extract}.py`. Do not mistake a
+  stub for a regression.
+
+### The guardian: `guardian/core.py` is the safety kernel
+
+`Guardian.filter(plan, state: ZoneState, history: RateHistory) -> GuardianVerdict` is the
+single pure entry point, built to be hammered by property tests later. Three protections in a
+fixed order: **whitelist** (off-whitelist actuators stripped, never fatal) → **comfort
+envelope** (occupied `23 ± 1.5 C` + a PMV "don't make discomfort worse" guard; unoccupied the
+wider `20-30 C` ECM band; occupancy read from `state`, never the plan) → **rate limit**
+(`1.0 C`/timestep and `2.0 C`/hour).
+
+- **No hidden state.** The rate limiter's memory lives in an explicit, immutable `RateHistory`
+  passed in and returned anew (`record()` prunes to the trailing hour). `filter` never mutates
+  it and never reads a clock — the executor records the *applied* value after each write. This
+  purity is deliberate: the property proofs land on exactly this interface.
+- **Reasons are a stable machine grammar.** `clip: <zone> <orig>-><new> <rule>`,
+  `rate: ... rate_step|rate_hour`, `strip: <zone> <actuator> whitelist`. Fed to the planner
+  verbatim in a later session — do not reword them casually.
+- **`GuardianVerdict.safe_plan` is a `Plan`.** Turning survivors into the `ApprovedPlan` the
+  actuator accepts is `Guardian.approve()` — the guardian stays the only producer of
+  `ApprovedPlan` (rule R2). No LLM or network import may ever appear anywhere in `guardian/`.
+
+**Two `Guardian` classes coexist, on purpose (for now).** `guardian/supervisor.py`
+(`review() -> ApprovedPlan`, per-actuator bounds, deadband) is the older first cut still used by
+the live-bus dumb-plan path and its tests. `guardian/core.py` (`filter() -> GuardianVerdict`,
+occupancy-driven envelope, explicit RateHistory) is the definitive kernel the **executor** uses.
+Retiring the supervisor onto core is future work — until then, do not assume "the guardian"
+means one file.
+
+### The executor runs the building with or without a planner
+
+`guardian/executor.py` is the actuator's hand. Each timestep it reads the latest plan from the
+thread-safe `common/planslot.py` (`PlanSlot.get/commit`, holds exactly the newest plan), *holds*
+it to the value in force now, filters every zone through `core.Guardian`, and calls
+`control.write_setpoints` — the one actuator write. With no plan, a rejected plan, or a tripped
+watchdog it writes the **baseline** (`guardian/fallback.py`), so the building runs safely
+forever on a silent planner.
+
+- **`guardian/watchdog.py`** trips when no *fresh* valid plan has arrived for `> 2` planning
+  intervals (sim time; freshness is per new commit, not per timestep — a plan that just sits in
+  the slot goes stale). On trip it yields a `WATCHDOG_TIMEOUT` `GuardianEvent` and the executor
+  forces the baseline.
+- **R1 on the executor path.** `Executor.provide` runs inside the EnergyPlus callback, so it
+  does **no** DB I/O: guardian events and the verdict stream are buffered and drained by the
+  harness *after* the run (`Executor.drain_events`). Only the store's already-batched telemetry
+  writes happen during the run.
+- Exit gate for this layer: `python -m experiments.smoke_roundtrip --abusive` drives an
+  18 C-occupied / 5 C-jump / off-whitelist plan through the executor and prints the verdict
+  stream; clip + rate + strip must all fire, the sim must complete, and `guardian_events` rows
+  must land.
 
 ### Two actuation modes, one interface
 

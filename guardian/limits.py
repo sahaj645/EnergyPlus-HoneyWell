@@ -56,4 +56,89 @@ class GuardianLimits(BaseModel):
 
 DEFAULT_LIMITS = GuardianLimits()
 
-__all__ = ["DEFAULT_LIMITS", "Bound", "GuardianLimits"]
+
+# --------------------------------------------------------------------------------------
+# Configuration for the core filter (guardian/core.py)
+# --------------------------------------------------------------------------------------
+#
+# `GuardianLimits` above is the older per-actuator envelope used by `guardian/supervisor.py`.
+# The core filter this session builds uses a comfort envelope selected by *observed occupancy*,
+# so its config is shaped differently: a centre + half-band for occupied hours, a wider ECM
+# band for unoccupied hours, an explicit rate policy, and an actuator whitelist. Kept here so
+# every guardian knob lives in one reviewable file.
+
+
+class EnvelopeConfig(BaseModel):
+    """Comfort envelope, selected at runtime by observed occupancy."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    #: Occupied hours: cooling setpoints held to ``centre ± half_band`` (default 23 ± 1.5).
+    occupied_centre_c: float = Field(default=23.0)
+    occupied_half_band_c: float = Field(default=1.5, gt=0)
+
+    #: Fanger PMV comfort target and tolerance. The guardian will not let a plan push observed
+    #: PMV further outside ``target ± tolerance``; it does not chase a PMV setpoint (that is the
+    #: planner's job - the guardian only refuses to make discomfort worse).
+    pmv_target: float = Field(default=0.0)
+    pmv_tolerance: float = Field(default=0.5, gt=0)
+
+    #: Unoccupied hours: a wider energy-conservation band (default 20-30 C).
+    unoccupied_min_c: float = Field(default=20.0)
+    unoccupied_max_c: float = Field(default=30.0)
+
+    @property
+    def occupied_min_c(self) -> float:
+        return self.occupied_centre_c - self.occupied_half_band_c
+
+    @property
+    def occupied_max_c(self) -> float:
+        return self.occupied_centre_c + self.occupied_half_band_c
+
+    def band(self, *, occupied: bool) -> tuple[float, float]:
+        """The ``(min, max)`` cooling-setpoint band in force for this occupancy."""
+        if occupied:
+            return (self.occupied_min_c, self.occupied_max_c)
+        return (self.unoccupied_min_c, self.unoccupied_max_c)
+
+
+class RateLimitConfig(BaseModel):
+    """How fast a setpoint may move. Enforced statefully via an explicit ``RateHistory``."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    max_step_per_timestep_c: float = Field(default=1.0, gt=0)
+    max_step_per_hour_c: float = Field(default=2.0, gt=0)
+
+
+class GuardianConfig(BaseModel):
+    """The full policy for the core filter. Data, not code - a reviewable diff to change."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    envelope: EnvelopeConfig = Field(default_factory=EnvelopeConfig)
+    rate: RateLimitConfig = Field(default_factory=RateLimitConfig)
+
+    #: The actuators the guardian will pass through. Anything else is stripped and logged,
+    #: never fatal. Defaults to exactly what the bus can drive today (the setpoint schedules);
+    #: a plan asking for a fan or lighting actuator is stripped until that path is wired.
+    whitelist: tuple[Actuator, ...] = (
+        Actuator.COOLING_SETPOINT_C,
+        Actuator.HEATING_SETPOINT_C,
+    )
+
+    def permits(self, actuator: Actuator) -> bool:
+        return actuator in self.whitelist
+
+
+DEFAULT_CONFIG = GuardianConfig()
+
+__all__ = [
+    "DEFAULT_CONFIG",
+    "DEFAULT_LIMITS",
+    "Bound",
+    "EnvelopeConfig",
+    "GuardianConfig",
+    "GuardianLimits",
+    "RateLimitConfig",
+]

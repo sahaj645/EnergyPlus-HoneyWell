@@ -272,6 +272,54 @@ class GuardianEvent(_Base):
     note: str = ""
 
 
+class GuardianStatus(StrEnum):
+    """Outcome of a single :meth:`guardian.core.Guardian.filter` call.
+
+    Distinct from :class:`GuardianDecision` on purpose. ``GuardianDecision`` is the older
+    vocabulary carried by :class:`ApprovedPlan` on the live-bus path; ``GuardianStatus`` is the
+    per-zone filter verdict, and its wording (``clipped``, not ``clamped``) matches the machine
+    reason strings the planner is fed verbatim in a later session. The executor maps a set of
+    per-zone statuses onto an ``ApprovedPlan``'s ``GuardianDecision`` when it assembles them.
+    """
+
+    ACCEPTED = "accepted"
+    CLIPPED = "clipped"
+    REJECTED = "rejected"
+
+
+class GuardianVerdict(_Base):
+    """What :meth:`guardian.core.Guardian.filter` returns for one zone.
+
+    ``reasons`` are short, stable, machine-usable strings - ``"clip: Z2 24.9->24.5
+    envelope_max"``, ``"rate: Z2 21.5->23 rate_step"``, ``"strip: Z2 fan_flow_fraction
+    whitelist"``. They are logged, surfaced on the dashboard, and (later) fed back to the
+    planner verbatim so it can learn what the guardian will not allow. Keep the grammar stable:
+    ``<action>: <zone> <orig>-><new> <rule>`` for clips/rates, ``strip: <zone> <actuator>
+    whitelist`` for strips.
+
+    ``safe_plan`` is a :class:`Plan` (not an :class:`ApprovedPlan`) holding only the steps that
+    survived filtering for this zone. Turning it into the ``ApprovedPlan`` the actuator accepts
+    is the guardian's job (rule R2) - see :meth:`guardian.core.Guardian.approve`.
+    """
+
+    status: GuardianStatus
+    zone: str
+    reasons: list[str] = Field(default_factory=list)
+    safe_plan: Plan
+
+    @property
+    def accepted(self) -> bool:
+        return self.status is GuardianStatus.ACCEPTED
+
+    @property
+    def clipped(self) -> bool:
+        return self.status is GuardianStatus.CLIPPED
+
+    @property
+    def rejected(self) -> bool:
+        return self.status is GuardianStatus.REJECTED
+
+
 # --------------------------------------------------------------------------------------
 # Model mutation: patches and version snapshots
 # --------------------------------------------------------------------------------------
@@ -480,6 +528,8 @@ __all__ = [
     "ForecastPoint",
     "GuardianDecision",
     "GuardianEvent",
+    "GuardianStatus",
+    "GuardianVerdict",
     "KpiSnapshot",
     "PatchOp",
     "PatchOperation",
