@@ -1,0 +1,72 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hive"
+version = "0.1.0"
+description = "HIVE - closed-loop building-energy control agent: LLM planner supervised by a deterministic safety guardian over an EnergyPlus digital twin."
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "Sahaj Gaur", email = "sahajgaur2005@gmail.com" }]
+keywords = ["energyplus", "building-energy", "llm-agent", "control", "digital-twin"]
+
+dependencies = [
+    "pydantic>=2.7",
+    "eppy",
+    "ollama",
+    "streamlit",
+    "pandas",
+    "mcp",
+]
+
+# NOTE: `pyenergyplus` is deliberately absent. It is NOT on PyPI - it ships inside
+# the EnergyPlus installation directory. See README ("EnergyPlus runtime API") and
+# `common/eplus_path.py`, which appends $ENERGYPLUS_DIR to sys.path at import time.
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "hypothesis",
+    "ruff",
+    "pre-commit",
+]
+
+[tool.setuptools]
+# Flat layout with several mandated top-level packages: auto-discovery cannot
+# guess this, so the package list is explicit.
+packages = [
+    "agent",
+    "common",
+    "dashboard",
+    "experiments",
+    "guardian",
+    "mcp_server",
+    "simulation",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = [
+    "simulation/out",
+    "simulation/outputs",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+
+[tool.ruff.lint.isort]
+known-first-party = [
+    "agent",
+    "common",
+    "dashboard",
+    "experiments",
+    "guardian",
+    "mcp_server",
+    "simulation",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

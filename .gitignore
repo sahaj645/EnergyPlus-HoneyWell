@@ -1,19 +1,50 @@
-# Python
+# --- Python ---
 __pycache__/
 *.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib60/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtualenvs
 .venv/
 venv/
 env/
-*.egg-info/
+ENV/
+
+# Tooling caches
 .pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.hypothesis/
+.coverage
+.coverage.*
+htmlcov/
 .ipynb_checkpoints/
 
-# Node
-node_modules/
-dist/
-build/
+# --- HIVE telemetry ---
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite3
+*.db
 
-# EnergyPlus run artifacts
+# --- EnergyPlus run artifacts ---
+simulation/out*/
 *.eso
 *.mtr
 *.mtd
@@ -26,17 +57,13 @@ build/
 *.err
 *.eio
 *.dxf
-*.svg
-Output/
-output/
-*.sql
 
-# Environment / secrets
+# --- Secrets / local config ---
 .env
 .env.*
 !.env.example
 
-# Editors / OS
+# --- Editors / OS ---
 .vscode/
 .idea/
 .DS_Store

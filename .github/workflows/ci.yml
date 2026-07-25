@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  lint-and-test:
+    name: ruff + pytest
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install project (with dev extras)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      # EnergyPlus is NOT installed in CI. `pyenergyplus` is unavailable here by
+      # design: nothing imported by the test suite may require the runtime API.
+      - name: Lint
+        run: ruff check .
+
+      - name: Test
+        run: pytest -q

@@ -1,0 +1,33 @@
+# REPRESENTATIVE Indian grid carbon-intensity curve — NOT measured CEA/POSOCO data.
+# Shape reflects the real diurnal signature of a coal-heavy grid with large solar capacity:
+#   flat coal baseload overnight, a deep midday dip as PV displaces thermal generation,
+#   then a sharp dirty evening peak as solar sets and peaking plant ramps to meet demand.
+# Units: grams CO2-equivalent per kWh delivered. Hour is local clock hour (0-23).
+# Note the midday dip and evening peak are ~1.8x apart — that spread is what makes
+# carbon-aware load shifting worth doing at all.
+# Replace with a measured grid feed before making any emissions claim.
+hour,g_co2_per_kwh
+0,712
+1,708
+2,705
+3,704
+4,706
+5,715
+6,700
+7,668
+8,624
+9,578
+10,536
+11,505
+12,488
+13,481
+14,492
+15,524
+16,578
+17,652
+18,760
+19,845
+20,868
+21,852
+22,806
+23,754

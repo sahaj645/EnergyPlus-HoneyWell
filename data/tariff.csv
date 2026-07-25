@@ -1,0 +1,31 @@
+# REPRESENTATIVE Indian commercial Time-of-Use tariff — NOT billing data.
+# Shape modelled on typical Indian SERC HT-commercial ToU structures (e.g. MERC / DERC):
+#   off-peak night, morning peak, cheap midday under heavy solar injection, hard evening peak.
+# Currency: INR per kWh. Hour is local clock hour (0-23), applying for that whole hour.
+# Bands: off_peak / normal / solar_offpeak / peak
+# Replace with the actual utility schedule before making any cost claim.
+hour,inr_per_kwh,band
+0,6.10,off_peak
+1,6.10,off_peak
+2,6.10,off_peak
+3,6.10,off_peak
+4,6.10,off_peak
+5,6.10,off_peak
+6,10.40,peak
+7,10.40,peak
+8,10.40,peak
+9,8.30,normal
+10,8.30,normal
+11,7.60,normal
+12,6.80,solar_offpeak
+13,6.50,solar_offpeak
+14,6.50,solar_offpeak
+15,6.80,solar_offpeak
+16,7.60,normal
+17,8.30,normal
+18,11.90,peak
+19,11.90,peak
+20,11.90,peak
+21,11.90,peak
+22,6.60,off_peak
+23,6.10,off_peak
