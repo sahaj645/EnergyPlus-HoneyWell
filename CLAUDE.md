@@ -113,14 +113,61 @@ media/        demo video
   directory. `common/eplus_path.py` appends `$ENERGYPLUS_DIR` to `sys.path` at import time.
   Import it before anything that touches the runtime API. CI has no EnergyPlus, so nothing
   in the test suite may require it at import time.
-- **Current state: baseline pipeline + closed loop landed; planner still stubbed.**
-  Implemented: `simulation/fetch_assets.py`, `simulation/run_baseline.py`,
-  `experiments/kpis.py` (the **experimental control** every A/B claim is measured against),
-  `simulation/prepare_idf.py`, `agent/bus.py`, `common/store.py`, `guardian/supervisor.py`
-  (first cut), and `experiments/smoke_roundtrip.py`. Still `NotImplementedError` stubs by
-  design: `agent/ollama_client.py`, `agent/digest.py`, `agent/plan_cache.py`,
-  `guardian/watchdog.py`, `guardian/fallback.py`, `mcp_server/*`, `dashboard/app.py`,
+- **Current state: baseline + closed loop + model-versioning landed; planner still stubbed.**
+  Implemented: `simulation/{fetch_assets,run_baseline,prepare_idf,idf_io,snapshots,patching,
+  receding}.py`, `agent/bus.py`, `common/store.py`, `guardian/supervisor.py` (first cut),
+  `experiments/{kpis,smoke_roundtrip}.py`. Still `NotImplementedError` stubs by design:
+  `agent/ollama_client.py`, `agent/digest.py`, `agent/plan_cache.py`, `guardian/watchdog.py`,
+  `guardian/fallback.py`, `mcp_server/*`, `dashboard/app.py`,
   `experiments/{ab_harness,endurance,kpi_extract}.py`. Do not mistake a stub for a regression.
+
+### Two actuation modes, one interface
+
+`common.models.ControlInterface` is the contract: `read_state()` and
+`write_setpoints(approved, now=...)`. Both implementations satisfy it, so agent code cannot
+tell them apart and switching is a construction-site change:
+
+| Mode | Class | How it actuates |
+|---|---|---|
+| `live` (default) | `agent.bus.SimulationBus` | Runtime-API writes into a running simulation |
+| `receding` | `simulation.receding.RecedingHorizonDriver` | Bakes the horizon chunk's schedules into a copy of the IDF, re-simulates, reads results back from the chunk's SQL |
+
+`python -m experiments.smoke_roundtrip --mode receding` selects it. Receding is the **H6
+contingency**: slower (one EnergyPlus start-up per chunk) and it cannot react *within* a chunk,
+but it depends on nothing except "EnergyPlus can run an IDF". `state` is an opaque
+mode-specific token - the E+ handle in live mode, ignored in receding mode - so callers outside
+a callback omit it.
+
+`RunPeriod` is day-granular, so a chunk is at minimum one day. To avoid flattening a
+time-varying plan to one constant, receding mode renders it as a `Schedule:Compact` with
+`Until:` blocks for the chunk.
+
+### Snapshots are never written from inside the callback
+
+Materialising an IDF means an eppy load and save - hundreds of milliseconds of blocking I/O,
+which rule R1 forbids on the callback path. So `SimulationBus` only appends to
+`bus.control_history` when the applied values actually change (a hash over a few floats), and
+the harness replays that history through `SnapshotWriter` **after** the run.
+
+### The version series is deduped by content, not by event
+
+Most planning cycles change nothing. `SnapshotWriter.commit()` returns `None` - writing no file
+and no manifest entry - when the state is control-identical to the **head**. Dedupe is against
+the head only, so returning to an earlier value is legitimately a new version. `content_hash`
+covers schedule values and applied patch ids, and deliberately excludes `sim_time` and
+`trigger`: the same setpoints at a different moment are the same model.
+
+### Rollback copies bytes; it does not invert patches
+
+`patching.rollback(v)` copies version `v` forward as a new version. Re-applying an inverse
+patch would be clever and wrong - float round-trips and eppy field normalisation mean a
+"reversed" patch is not guaranteed to reproduce the original file. History is append-only:
+rolling back adds a version, never deletes one. Patches validate by re-parsing before the new
+version is accepted, so a bad patch leaves the head untouched.
+
+**`patch_model` has a blast radius the guardian does not cover.** The guardian reviews *plans*,
+not patches; a patch can change any object in the model. Autonomous use needs its own review
+gate, which does not exist yet.
 
 ### The runtime API bites in four specific places
 
@@ -158,6 +205,10 @@ simulation time. `PlanStep.offset_minutes` is measured from the sim time at whic
   and is what the bus loads; it is never re-derived by re-parsing the IDF.
 - **Order of operations:** `fetch_assets` → `prepare_idf` → `smoke_roundtrip` / agent runs.
   `run_baseline` uses `baseline.idf` directly and does not need `prepare_idf`.
+- **`simulation/versions/` is gitignored** — it is generated per machine by running the
+  harness and packaged at submission time. `manifest.json` is its index; inspect with
+  `simulation.snapshots.summarize()`. Snapshots and patches share **one** version series on
+  purpose: the deliverable is a single ordered history, not two interleaved ones.
 - **The data in `data/` is representative, not authoritative.** Indian ToU tariff and grid
   carbon-intensity curves shaped for realistic behaviour (midday solar dip, dirty evening
   peak). Fine for optimisation and demos; do not present it as billing data.

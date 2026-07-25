@@ -50,6 +50,14 @@ simulation/agentic.idf
 simulation/agentic_model.json
 *.epw
 
+# Generated model series (competition deliverable #2). Produced per machine by running the
+# harness, and packaged at submission time - committing every prototype-sized IDF the agent
+# emits would bloat the repo for no reviewable benefit. `manifest.json` describes the series.
+# (Ignore the *contents*, not the directory: git does not descend into an ignored
+# directory, so a negation inside one never matches.)
+simulation/versions/*
+!simulation/versions/.gitkeep
+
 # --- EnergyPlus run artifacts ---
 simulation/out*/
 *.sql

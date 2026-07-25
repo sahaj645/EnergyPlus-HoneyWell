@@ -122,15 +122,10 @@ def occupied_setpoint(values: list[str], kind: str) -> float | None:
 
 
 def _load_idf(idf_path: Path, install_dir: Path):
-    from eppy.modeleditor import IDF
+    """Delegates to the shared bootstrap - ``IDF.setiddname`` is process-global."""
+    from simulation.idf_io import load_idf
 
-    idd = install_dir / "Energy+.idd"
-    if not idd.is_file():
-        raise FileNotFoundError(
-            f"Energy+.idd not found at {idd}; is {install_dir} an EnergyPlus root?"
-        )
-    IDF.setiddname(str(idd))
-    return IDF(str(idf_path))
+    return load_idf(idf_path, install_dir)
 
 
 def _field(obj, candidates: tuple[str, ...]) -> str | None:

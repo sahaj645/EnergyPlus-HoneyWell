@@ -16,12 +16,15 @@ Two properties this module is designed around:
 
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
+from typing import Protocol, runtime_checkable
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 SCHEMA_VERSION = 1
 
@@ -269,18 +272,223 @@ class GuardianEvent(_Base):
     note: str = ""
 
 
+# --------------------------------------------------------------------------------------
+# Model mutation: patches and version snapshots
+# --------------------------------------------------------------------------------------
+#
+# Competition deliverable #2 is "baseline + runtime-modified .idf files". These types are the
+# contract for producing that series: `AppliedControlState` is what a snapshot captures,
+# `PatchSpec` is a structural edit, and `SnapshotManifest` is the index tying them together.
+
+
+class PatchOp(StrEnum):
+    """The closed set of structural edits ``patch_model`` may make to an IDF."""
+
+    SET_FIELD = "set_field"
+    ADD_OBJECT = "add_object"
+    REMOVE_OBJECT = "remove_object"
+
+
+class PatchOperation(_Base):
+    """One edit against one IDF object.
+
+    Deliberately narrow. An LLM-driven ``patch_model`` with a free-form "edit the IDF" surface
+    can do arbitrary damage; three verbs against a named object is something the validator can
+    actually reason about, and something a reviewer can read in a diff.
+    """
+
+    op: PatchOp
+    object_type: str = Field(min_length=1, description="IDF class, e.g. 'SCHEDULE:CONSTANT'.")
+    object_name: str = Field(min_length=1)
+    field: str | None = Field(default=None, description="eppy field name, for set_field.")
+    value: float | str | None = None
+    fields: dict[str, float | str] = Field(
+        default_factory=dict, description="Field name -> value, for add_object."
+    )
+
+    @model_validator(mode="after")
+    def _check_shape(self) -> PatchOperation:
+        if self.op is PatchOp.SET_FIELD:
+            if not self.field:
+                raise ValueError("set_field requires 'field'")
+            if self.value is None:
+                raise ValueError("set_field requires 'value'")
+        elif self.op is PatchOp.ADD_OBJECT and not self.fields:
+            raise ValueError("add_object requires 'fields'")
+        return self
+
+    def describe(self) -> str:
+        if self.op is PatchOp.SET_FIELD:
+            return f"set {self.object_type}[{self.object_name}].{self.field} = {self.value}"
+        if self.op is PatchOp.ADD_OBJECT:
+            return f"add {self.object_type}[{self.object_name}] ({len(self.fields)} fields)"
+        return f"remove {self.object_type}[{self.object_name}]"
+
+
+class PatchSpec(_Base):
+    """A reviewable, rollback-safe bundle of IDF edits.
+
+    Applied atomically: the patched model must parse before the new version is accepted, so a
+    spec either lands whole or not at all. This is the payload of the MCP ``patch_model`` tool.
+    """
+
+    patch_id: str = Field(default_factory=_new_id)
+    created_at: datetime = Field(default_factory=_now)
+    reason: str = Field(default="", max_length=500)
+    operations: list[PatchOperation] = Field(min_length=1, max_length=64)
+
+    def describe(self) -> list[str]:
+        return [operation.describe() for operation in self.operations]
+
+
+class AppliedControlState(_Base):
+    """The control state actually in force at a moment in simulation time.
+
+    This is what a snapshot materialises into an IDF. It is intentionally *not* a plan: a plan
+    is an intention over a horizon, whereas this is the flat set of values in force right now,
+    which is the only thing an IDF can express.
+    """
+
+    sim_time: datetime
+    schedule_values: dict[str, float] = Field(default_factory=dict)
+    applied_patches: list[str] = Field(default_factory=list)
+    plan_id: str | None = None
+    trigger: str = Field(default="plan_commit", max_length=64)
+
+    def content_hash(self) -> str:
+        """Stable hash of the *control-relevant* content only.
+
+        Excludes ``sim_time`` and ``trigger`` on purpose: two commits with identical setpoints
+        at different times are the same model, and writing the second one would pad the version
+        series with noise. Values are rounded before hashing so float representation drift
+        cannot manufacture a spurious new version.
+        """
+        payload = {
+            "schedules": {k: round(float(v), 4) for k, v in sorted(self.schedule_values.items())},
+            "patches": sorted(self.applied_patches),
+        }
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:16]
+
+    def diff_against(self, previous: AppliedControlState | None) -> list[str]:
+        """Human-readable summary of what changed since ``previous``."""
+        if previous is None:
+            return [f"initial: {len(self.schedule_values)} schedule(s)"]
+
+        lines: list[str] = []
+        for name in sorted(set(self.schedule_values) | set(previous.schedule_values)):
+            before = previous.schedule_values.get(name)
+            after = self.schedule_values.get(name)
+            if before is None:
+                lines.append(f"+{name} = {after:.2f}")
+            elif after is None:
+                lines.append(f"-{name} (was {before:.2f})")
+            elif round(before, 4) != round(after, 4):
+                lines.append(f"{name}: {before:.2f} -> {after:.2f}")
+
+        for patch in sorted(set(self.applied_patches) - set(previous.applied_patches)):
+            lines.append(f"+patch {patch}")
+        for patch in sorted(set(previous.applied_patches) - set(self.applied_patches)):
+            lines.append(f"-patch {patch}")
+
+        return lines or ["no control-relevant change"]
+
+
+class SnapshotEntry(_Base):
+    """One row of the version manifest - one materialised ``.idf`` on disk."""
+
+    version: int = Field(ge=1)
+    path: str
+    content_hash: str
+    sim_time: datetime
+    trigger: str
+    plan_id: str | None = None
+    diff_summary: list[str] = Field(default_factory=list)
+    state: AppliedControlState
+
+
+class SnapshotManifest(_Base):
+    """The index of the generated model series - competition deliverable #2."""
+
+    base_idf: str = ""
+    entries: list[SnapshotEntry] = Field(default_factory=list)
+
+    @property
+    def head(self) -> SnapshotEntry | None:
+        return self.entries[-1] if self.entries else None
+
+    @property
+    def next_version(self) -> int:
+        return max((e.version for e in self.entries), default=0) + 1
+
+    def entry(self, version: int) -> SnapshotEntry | None:
+        for item in self.entries:
+            if item.version == version:
+                return item
+        return None
+
+    def save(self, path: Path | str) -> Path:
+        out = Path(path)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(self.model_dump_json(indent=2), encoding="utf-8")
+        return out
+
+    @classmethod
+    def load(cls, path: Path | str) -> SnapshotManifest:
+        target = Path(path)
+        if not target.is_file():
+            return cls()
+        return cls.model_validate_json(target.read_text(encoding="utf-8"))
+
+
+# --------------------------------------------------------------------------------------
+# The control interface
+# --------------------------------------------------------------------------------------
+
+
+@runtime_checkable
+class ControlInterface(Protocol):
+    """What the agent talks to, whichever actuation mode is in force.
+
+    ``agent.bus.SimulationBus`` (live actuation) and
+    ``simulation.receding.RecedingHorizonDriver`` (re-simulation) both satisfy this. Agent code
+    depends on this shape and nothing more, so switching modes is a construction-site change
+    rather than a code change - which is the whole point of having a contingency mode.
+
+    ``state`` is an opaque, mode-specific token: the EnergyPlus state handle in live mode,
+    unused in receding mode. Callers that are not inside a callback omit it.
+    """
+
+    def read_state(self, state: object | None = ...) -> BuildingState | None:
+        """Latest observation, or ``None`` when nothing is observable yet."""
+        ...
+
+    def write_setpoints(
+        self, approved: ApprovedPlan, *, now: datetime, state: object | None = ...
+    ) -> int:
+        """Apply a guardian-approved plan. Returns the number of values written."""
+        ...
+
+
 __all__ = [
     "SCHEMA_VERSION",
     "Actuator",
+    "AppliedControlState",
     "ApprovedPlan",
     "BuildingState",
+    "ControlInterface",
     "ForecastPoint",
     "GuardianDecision",
     "GuardianEvent",
     "KpiSnapshot",
+    "PatchOp",
+    "PatchOperation",
+    "PatchSpec",
     "Plan",
     "PlanStep",
     "PreparedModel",
+    "SnapshotEntry",
+    "SnapshotManifest",
     "Violation",
     "ViolationCode",
     "ZoneBinding",

@@ -36,7 +36,14 @@ from pathlib import Path
 
 from common import eplus_path
 from common.log import get_logger
-from common.models import Actuator, ApprovedPlan, BuildingState, PreparedModel, ZoneState
+from common.models import (
+    Actuator,
+    AppliedControlState,
+    ApprovedPlan,
+    BuildingState,
+    PreparedModel,
+    ZoneState,
+)
 from common.store import TelemetryStore
 
 log = get_logger("agent.bus")
@@ -121,12 +128,26 @@ class SimulationBus:
 
         self._api = None
         self._state = None
+        #: Set at the top of every callback so the ControlInterface methods can be called
+        #: without threading the opaque EnergyPlus state handle through agent code.
+        self._current_state = None
         self._handles_ready = False
         self._var_handles: dict[tuple[str, str], int] = {}
         self._meter_handle: int = _BAD_HANDLE
         self._actuator_handles: dict[str, int] = {}
         self._plan_anchor: dict[str, datetime] = {}
         self._warned: set[str] = set()
+
+        #: Values currently written to each schedule, seeded with the prepared baseline.
+        self._applied: dict[str, float] = dict(model.constant_schedules)
+        #: Every *distinct* control state this run passed through, in order.
+        #:
+        #: Snapshots are NOT materialised here. Writing an IDF means an eppy load and save -
+        #: hundreds of milliseconds of blocking I/O, inside a synchronous C callback, which is
+        #: exactly what rule R1 forbids. So the callback only appends a small record when the
+        #: applied values actually change (a dict compare over a handful of floats), and
+        #: `simulation.snapshots` materialises the series after the run.
+        self.control_history: list[AppliedControlState] = []
 
     # -- variable inventory ------------------------------------------------------------
 
@@ -207,6 +228,8 @@ class SimulationBus:
     def _on_timestep(self, state) -> None:
         """Synchronous C callback. Must never raise, never block, never await."""
         try:
+            self._current_state = state
+
             # (2) No handles, no reads, nothing until the exchange is populated.
             if not self._api.exchange.api_data_fully_ready(state):
                 self.stats.not_ready_skips += 1
@@ -232,7 +255,7 @@ class SimulationBus:
             if self.plan_provider is not None:
                 approved = self.plan_provider(observation.sim_time)
                 if approved is not None:
-                    self.write_setpoints(state, approved, now=observation.sim_time)
+                    self.write_setpoints(approved, now=observation.sim_time, state=state)
 
             self.stats.timesteps += 1
 
@@ -321,15 +344,22 @@ class SimulationBus:
         joules = float(self._api.exchange.get_meter_value(state, self._meter_handle))
         return joules / J_PER_KWH
 
-    def read_state(self, state) -> BuildingState | None:
-        """Build the current observation.
+    def read_state(self, state: object | None = None) -> BuildingState | None:
+        """Build the current observation. Satisfies :class:`~common.models.ControlInterface`.
 
         Returns a :class:`BuildingState` - the whole-building observation, of which per-zone
         :class:`ZoneState` records are a part. Callers get temperature, PMV, occupancy and
         both setpoints per zone, plus facility power and the simulation timestamp.
 
+        ``state`` is the opaque EnergyPlus handle. Callers inside the callback pass it; agent
+        code written against the mode-agnostic interface omits it and gets the handle from the
+        callback currently in flight.
+
         ``None`` means "not observable yet": warmup, or the calendar not yet meaningful.
         """
+        state = state if state is not None else self._current_state
+        if state is None:
+            return None
         if self._api.exchange.warmup_flag(state):
             return None
         now = self.sim_datetime(state)
@@ -381,7 +411,9 @@ class SimulationBus:
 
     # -- writing -----------------------------------------------------------------------
 
-    def write_setpoints(self, state, approved: ApprovedPlan, *, now: datetime) -> int:
+    def write_setpoints(
+        self, approved: ApprovedPlan, *, now: datetime, state: object | None = None
+    ) -> int:
         """Actuate a **guardian-approved** plan. Returns the number of actuator writes.
 
         Deliberately typed to ``ApprovedPlan``, not ``Plan`` or ``PlanStep`` (rule R2): the
@@ -391,8 +423,12 @@ class SimulationBus:
         wall-clock UTC while the simulation runs in simulation time - mixing them silently
         produces nonsense. So the bus anchors each plan to the *simulation* time at which it
         first saw that ``plan_id`` and measures offsets from there.
+
+        Signature matches :class:`~common.models.ControlInterface` so the receding-horizon
+        driver is a drop-in replacement.
         """
-        if self._api.exchange.warmup_flag(state):
+        state = state if state is not None else self._current_state
+        if state is None or self._api.exchange.warmup_flag(state):
             return 0
 
         anchor = self._plan_anchor.setdefault(approved.plan_id, now)
@@ -423,10 +459,28 @@ class SimulationBus:
                 )
                 continue
             self._api.exchange.set_actuator_value(state, handle, float(value))
+            self._applied[schedule] = float(value)
             writes += 1
 
         self.stats.actuator_writes += writes
+        self._note_control_state(now, plan_id=approved.plan_id, trigger="plan_commit")
         return writes
+
+    def _note_control_state(self, now: datetime, *, plan_id: str | None, trigger: str) -> None:
+        """Append to :attr:`control_history` iff the applied values actually changed.
+
+        Cheap by construction - a hash over a few floats, no I/O - because this runs on the
+        callback path (rule R1). Materialisation happens after the run.
+        """
+        state = AppliedControlState(
+            sim_time=now,
+            schedule_values=dict(self._applied),
+            plan_id=plan_id,
+            trigger=trigger,
+        )
+        if self.control_history and self.control_history[-1].content_hash() == state.content_hash():
+            return
+        self.control_history.append(state)
 
     def _schedule_for(self, zone: str, actuator: Actuator) -> str | None:
         """Resolve ``(zone, actuator)`` to the Schedule:Constant name that drives it."""
@@ -467,7 +521,13 @@ class SimulationBus:
                 handle = self._actuator_handles.get(schedule, _BAD_HANDLE)
                 if handle != _BAD_HANDLE:
                     self._api.exchange.set_actuator_value(state, handle, float(baseline))
+                    self._applied[schedule] = float(baseline)
             self.stats.fallback_actuations += 1
+            # A fallback is a real control change and belongs in the version series - it is
+            # how "the agent stopped driving at 14:20" becomes visible in the deliverable.
+            now = self.sim_datetime(state)
+            if now is not None:
+                self._note_control_state(now, plan_id=None, trigger="fallback")
         except Exception:
             log.exception("baseline fallback actuation failed; simulation continues uncontrolled")
 

@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 import pandas as pd
@@ -40,8 +40,18 @@ from common.log import get_logger
 from common.models import Actuator, ApprovedPlan, BuildingState, Plan, PlanStep, PreparedModel
 from common.store import TelemetryStore, read_telemetry
 from guardian.supervisor import Guardian
+from simulation.receding import RecedingHorizonDriver
+from simulation.snapshots import SnapshotWriter, summarize
 
 log = get_logger("experiments.smoke")
+
+MODE_LIVE = "live"
+MODE_RECEDING = "receding"
+
+#: Receding mode sets the RunPeriod itself, so it needs a date; live mode takes it from the
+#: IDF. Mid-July is a hot day in a cooling-dominated Indian climate, which is where a setback
+#: has something to act on.
+DEFAULT_START = date(2017, 7, 15)
 
 SETBACK_START_HOUR = 14
 SETBACK_END_HOUR = 16
@@ -232,8 +242,12 @@ def _run_arm(
     approved: ApprovedPlan | None,
     out_root: Path,
     db_path: Path,
+    mode: str = MODE_LIVE,
+    snapshot_writer: SnapshotWriter | None = None,
+    start_date: date | None = None,
+    days: int = 1,
 ) -> str:
-    """Run one arm for a single day. Returns its ``run_id``."""
+    """Run one arm for a single day in either actuation mode. Returns its ``run_id``."""
     run_id = f"smoke-{label}"
     out_dir = out_root / f"out_smoke_{label}"
 
@@ -245,28 +259,56 @@ def _run_arm(
     with TelemetryStore(db_path, flush_every_timesteps=12) as store:
         if approved is not None:
             store.write_approved_plan(approved, run_id=run_id)
-        bus = SimulationBus(
-            model=model,
-            store=store,
-            run_id=run_id,
-            epw_path=settings.epw_path,
-            out_dir=out_dir,
-            plan_provider=provider,
-        )
-        exit_code = bus.run()
 
-    log.info("arm %s: exit=%s %s", label, exit_code, bus.stats.summary())
+        if mode == MODE_RECEDING:
+            driver = RecedingHorizonDriver(
+                model=model,
+                store=store,
+                run_id=run_id,
+                epw_path=settings.epw_path,
+                out_dir=out_dir,
+                start_date=start_date or DEFAULT_START,
+                total_days=days,
+                plan_provider=provider,
+                snapshot_writer=snapshot_writer,
+            )
+            exit_code = driver.run()
+            summary = driver.stats.summary()
+            recorded = driver.stats.timesteps_recorded
+        else:
+            bus = SimulationBus(
+                model=model,
+                store=store,
+                run_id=run_id,
+                epw_path=settings.epw_path,
+                out_dir=out_dir,
+                plan_provider=provider,
+            )
+            exit_code = bus.run()
+            summary = bus.stats.summary()
+            recorded = bus.stats.timesteps
+            # Materialise the version series *after* the run: writing an IDF inside the
+            # callback would be blocking I/O on the hot path (rule R1).
+            if snapshot_writer is not None:
+                for state in bus.control_history:
+                    snapshot_writer.commit(state)
+
+    log.info("arm %s (%s): exit=%s %s", label, mode, exit_code, summary)
     if exit_code != 0:
         raise RuntimeError(f"arm {label} failed with exit code {exit_code}; see {out_dir}")
-    if bus.stats.timesteps == 0:
-        raise RuntimeError(
-            f"arm {label} recorded no timesteps - handles never became ready. "
-            f"missing={bus.stats.missing_handles}"
-        )
+    if recorded == 0:
+        raise RuntimeError(f"arm {label} recorded no timesteps; see {out_dir}")
     return run_id
 
 
-def run_smoke(settings: Settings | None = None, *, db_path: Path | None = None) -> RoundTripResult:
+def run_smoke(
+    settings: Settings | None = None,
+    *,
+    db_path: Path | None = None,
+    mode: str = MODE_LIVE,
+    start_date: date | None = None,
+    days: int = 1,
+) -> RoundTripResult:
     """Run both arms and evaluate. Requires EnergyPlus and a prepared IDF."""
     settings = settings or Settings.from_env()
     eplus_path.require_energyplus()
@@ -300,29 +342,68 @@ def run_smoke(settings: Settings | None = None, *, db_path: Path | None = None) 
             "the smoke plan is outside the safety envelope"
         )
 
-    # Both arms use the same IDF and therefore the same RunPeriod - the only difference
-    # between them is whether a plan reaches the bus.
-    control_id = _run_arm(
-        "control", model=model, settings=settings, approved=None,
-        out_root=settings.simulation_dir, db_path=db_path,
+    # Only the agent arm produces a version series - the control arm is the unmodified model
+    # by definition, so snapshotting it would add nothing to deliverable #2.
+    snapshot_writer = SnapshotWriter(
+        base_idf=model.idf_path,
+        versions_dir=settings.simulation_dir / "versions",
     )
-    agent_id = _run_arm(
-        "agent", model=model, settings=settings, approved=approved,
-        out_root=settings.simulation_dir, db_path=db_path,
-    )
+
+    # Both arms use the same IDF - the only difference is whether a plan reaches the
+    # controller. In receding mode the driver sets the RunPeriod per chunk; in live mode it
+    # comes from the IDF.
+    common = {
+        "model": model,
+        "settings": settings,
+        "out_root": settings.simulation_dir,
+        "db_path": db_path,
+        "mode": mode,
+        "start_date": start_date,
+        "days": days,
+    }
+    control_id = _run_arm("control", approved=None, **common)
+    agent_id = _run_arm("agent", approved=approved, snapshot_writer=snapshot_writer, **common)
+
+    log.info("version series: %d file(s)", snapshot_writer.version_count)
+    print(summarize(settings.simulation_dir / "versions"))
 
     control = read_telemetry(db_path, run_id=control_id)
     agent = read_telemetry(db_path, run_id=agent_id)
     return evaluate_roundtrip(control, agent)
 
 
+def parse_start(value: str) -> date:
+    """Parse ``MM-DD`` into a date on the nominal non-leap calendar the RunPeriods use."""
+    month, day = (int(part) for part in value.split("-", 1))
+    return date(2017, month, day)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Prove the closed loop without an LLM.")
     parser.add_argument("--db", default=None, help="telemetry database path")
+    parser.add_argument(
+        "--mode",
+        choices=[MODE_LIVE, MODE_RECEDING],
+        default=MODE_LIVE,
+        help="live = runtime-API actuation; receding = re-simulate each horizon chunk",
+    )
+    parser.add_argument(
+        "--start",
+        type=parse_start,
+        default=DEFAULT_START,
+        help="MM-DD start date (receding mode only; live mode uses the IDF's RunPeriod)",
+    )
+    parser.add_argument("--days", type=int, default=1, help="days to simulate (receding mode)")
     args = parser.parse_args(argv)
 
     settings = Settings.from_env()
-    result = run_smoke(settings, db_path=Path(args.db) if args.db else None)
+    result = run_smoke(
+        settings,
+        db_path=Path(args.db) if args.db else None,
+        mode=args.mode,
+        start_date=args.start,
+        days=args.days,
+    )
     print(result.describe())
     return 0 if result.ok else 1
 

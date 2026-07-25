@@ -45,8 +45,12 @@ MODULES = [
     "mcp_server.server",
     "mcp_server.tools",
     "simulation.fetch_assets",
+    "simulation.idf_io",
+    "simulation.patching",
     "simulation.prepare_idf",
+    "simulation.receding",
     "simulation.run_baseline",
+    "simulation.snapshots",
 ]
 
 

@@ -1,0 +1,11 @@
+# Runtime-generated model series (competition deliverable #2).
+#
+# Populated by `simulation/snapshots.py` on every committed plan change, and by
+# `simulation/patching.py` on every applied patch. `manifest.json` is the index:
+# version, sim datetime, trigger, content hash, and a diff summary against the previous
+# version.
+#
+# Contents are gitignored - regenerate with:
+#   python -m experiments.smoke_roundtrip
+# and inspect with:
+#   python -c "from simulation.snapshots import summarize; print(summarize('simulation/versions'))"

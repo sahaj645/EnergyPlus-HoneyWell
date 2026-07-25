@@ -279,7 +279,7 @@ def test_write_setpoints_is_a_noop_during_warmup(bus_and_exchange) -> None:
             )
         ],
     )
-    assert bus.write_setpoints(STATE, approved, now=datetime(2017, 7, 15, 14)) == 0
+    assert bus.write_setpoints(approved, now=datetime(2017, 7, 15, 14), state=STATE) == 0
     assert exchange.writes == []
 
 
@@ -424,14 +424,14 @@ def test_latest_applicable_step_wins(bus_and_exchange) -> None:
     approved = approved_setback()
     anchor = datetime(2017, 7, 15, 0, 0)
 
-    bus.write_setpoints(STATE, approved, now=anchor)  # anchors the plan here
+    bus.write_setpoints(approved, now=anchor, state=STATE)  # anchors the plan here
     exchange.writes.clear()
 
-    bus.write_setpoints(STATE, approved, now=anchor + timedelta(minutes=900))  # 15:00
+    bus.write_setpoints(approved, now=anchor + timedelta(minutes=900), state=STATE)  # 15:00
     assert exchange.writes == [(COOLING_SCHEDULE, 26.0)]
 
     exchange.writes.clear()
-    bus.write_setpoints(STATE, approved, now=anchor + timedelta(minutes=1000))  # 16:40
+    bus.write_setpoints(approved, now=anchor + timedelta(minutes=1000), state=STATE)  # 16:40
     assert exchange.writes == [(COOLING_SCHEDULE, 24.0)], "must restore after the window"
 
 
@@ -441,7 +441,7 @@ def test_future_steps_are_not_applied_early(bus_and_exchange) -> None:
     approved = approved_setback()
     anchor = datetime(2017, 7, 15, 0, 0)
 
-    bus.write_setpoints(STATE, approved, now=anchor)
+    bus.write_setpoints(approved, now=anchor, state=STATE)
     assert exchange.writes == [(COOLING_SCHEDULE, 24.0)], "only the t0 step is due"
 
 
@@ -452,11 +452,11 @@ def test_plan_is_anchored_in_simulation_time_not_wall_clock(bus_and_exchange) ->
     approved = approved_setback()
 
     first_seen = datetime(2017, 7, 15, 0, 0)
-    bus.write_setpoints(STATE, approved, now=first_seen)
+    bus.write_setpoints(approved, now=first_seen, state=STATE)
     assert bus._plan_anchor[approved.plan_id] == first_seen
 
     # Anchor is sticky: a later call does not re-anchor and re-trigger the setback.
-    bus.write_setpoints(STATE, approved, now=first_seen + timedelta(hours=20))
+    bus.write_setpoints(approved, now=first_seen + timedelta(hours=20), state=STATE)
     assert bus._plan_anchor[approved.plan_id] == first_seen
 
 
@@ -474,7 +474,7 @@ def test_unwired_actuator_is_skipped_not_misapplied(bus_and_exchange) -> None:
             )
         ],
     )
-    assert bus.write_setpoints(STATE, approved, now=datetime(2017, 7, 15)) == 0
+    assert bus.write_setpoints(approved, now=datetime(2017, 7, 15), state=STATE) == 0
     assert exchange.writes == []
 
 
@@ -495,7 +495,7 @@ def test_unknown_zone_in_an_approved_plan_is_skipped(bus_and_exchange) -> None:
             )
         ],
     )
-    assert bus.write_setpoints(STATE, approved, now=datetime(2017, 7, 15)) == 0
+    assert bus.write_setpoints(approved, now=datetime(2017, 7, 15), state=STATE) == 0
 
 
 def test_heating_and_cooling_write_to_different_schedules(bus_and_exchange) -> None:
@@ -515,5 +515,5 @@ def test_heating_and_cooling_write_to_different_schedules(bus_and_exchange) -> N
             ),
         ],
     )
-    bus.write_setpoints(STATE, approved, now=datetime(2017, 7, 15))
+    bus.write_setpoints(approved, now=datetime(2017, 7, 15), state=STATE)
     assert dict(exchange.writes) == {COOLING_SCHEDULE: 26.0, HEATING_SCHEDULE: 20.0}
