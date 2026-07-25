@@ -113,8 +113,18 @@ media/        demo video
   directory. `common/eplus_path.py` appends `$ENERGYPLUS_DIR` to `sys.path` at import time.
   Import it before anything that touches the runtime API. CI has no EnergyPlus, so nothing
   in the test suite may require it at import time.
-- **Current state: scaffold only.** Modules are stubs that raise `NotImplementedError` by
-  design. No control logic has been written yet. Do not mistake a stub for a regression.
+- **Current state: baseline pipeline landed; agent path still stubbed.** Implemented so far:
+  `simulation/fetch_assets.py` (asset acquisition, copies the prototype IDF from
+  `$ENERGYPLUS_DIR/ExampleFiles` or prints manual instructions), `simulation/run_baseline.py`
+  (runtime-API run, eppy RunPeriod/meter patching, hottest-week selection), and
+  `experiments/kpis.py` (KPI extraction from the E+ SQL: site kWh, itemised HVAC kWh, peak kW,
+  ToU ₹, kgCO2). This baseline run is the **experimental control** every A/B claim is measured
+  against. The agent, guardian, MCP and dashboard modules are still `NotImplementedError`
+  stubs by design — do not mistake a stub for a regression.
+- **`experiments/kpis.py` reads the EnergyPlus SQL; `experiments/kpi_extract.py` reads the HIVE
+  telemetry DB.** Two different sources on purpose: the baseline has no agent and no HIVE DB,
+  so its only truth is E+'s own `eplusout.sql`.
+- **`baseline.idf` / `weather.epw` are gitignored** — fetched per machine, never committed.
 - **The data in `data/` is representative, not authoritative.** Indian ToU tariff and grid
   carbon-intensity curves shaped for realistic behaviour (midday solar dip, dirty evening
   peak). Fine for optimisation and demos; do not present it as billing data.

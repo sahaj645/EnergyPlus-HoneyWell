@@ -43,8 +43,14 @@ htmlcov/
 *.sqlite3
 *.db
 
+# --- EnergyPlus simulation assets (fetched, not committed: size + licensing) ---
+simulation/baseline.idf
+simulation/weather.epw
+*.epw
+
 # --- EnergyPlus run artifacts ---
 simulation/out*/
+*.sql
 *.eso
 *.mtr
 *.mtd

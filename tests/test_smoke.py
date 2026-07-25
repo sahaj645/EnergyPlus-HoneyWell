@@ -35,12 +35,14 @@ MODULES = [
     "experiments.ab_harness",
     "experiments.endurance",
     "experiments.kpi_extract",
+    "experiments.kpis",
     "guardian.fallback",
     "guardian.limits",
     "guardian.supervisor",
     "guardian.watchdog",
     "mcp_server.server",
     "mcp_server.tools",
+    "simulation.fetch_assets",
     "simulation.run_baseline",
 ]
 
