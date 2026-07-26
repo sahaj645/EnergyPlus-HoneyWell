@@ -475,6 +475,13 @@ def _set_run_period(idf, chunk: HorizonChunk) -> None:
     period.Begin_Day_of_Month = chunk.start.day
     period.End_Month = chunk.end.month
     period.End_Day_of_Month = chunk.end.day
+    # Set the real calendar day-of-week for the chunk's start date. Without this a single-day
+    # RunPeriod inherits whatever the base IDF had (observed: always Sunday), so every chunk
+    # simulates as a weekend - the office People schedules read zero occupancy, the building has
+    # no internal gains, and the planner is handed an empty building it has no reason to act on.
+    # Anchoring to the true weekday restores the real occupied/unoccupied pattern.
+    if "Day_of_Week_for_Start_Day" in period.fieldnames:
+        period.Day_of_Week_for_Start_Day = chunk.start.strftime("%A")
 
 
 def _run_energyplus(idf_path: Path, epw_path: Path, out_dir: Path) -> int:

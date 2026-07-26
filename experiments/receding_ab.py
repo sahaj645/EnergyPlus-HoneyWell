@@ -41,12 +41,13 @@ def _span_days(spec: RunPeriodSpec) -> tuple[date, int]:
 
 
 def run_receding_agent_arm(
-    settings: Settings, spec: RunPeriodSpec, *, out_dir: Path, install_dir, timeout_s: float
+    settings: Settings, spec: RunPeriodSpec, *, out_dir: Path, install_dir, timeout_s: float,
+    use_agent: bool = True,
 ) -> Path:
     from agent.digest import build_digest, load_forecast
     from agent.planner import Planner
     from guardian.core import Guardian, RateHistory
-    from simulation.receding import RecedingHorizonDriver
+    from simulation.receding import RecedingHorizonDriver, read_chunk_results
     from simulation.run_baseline import _read_epw_drybulb
 
     model = PreparedModel.load(settings.simulation_dir / "agentic_model.json")
@@ -77,25 +78,45 @@ def run_receding_agent_arm(
 
     start_date, total_days = _span_days(spec)
 
+    # Capture the previous chunk's observations so the planner reasons about that day's *busiest*
+    # occupied hour, not its last (midnight, empty) timestep - which is what the driver's own
+    # `read_state()` returns and why the agent otherwise sees an empty building and holds.
+    prev_states: list = []
+
+    def capturing_reader(sql_path, mdl):
+        obs = read_chunk_results(sql_path, mdl)
+        prev_states.clear()
+        prev_states.extend(obs)
+        return obs
+
     driver = RecedingHorizonDriver(
         model=model, store=TelemetryStore(db_path), run_id="receding-agent",
         epw_path=settings.epw_path, out_dir=out_dir, start_date=start_date,
         total_days=total_days, horizon_days=1, idf_path=patched, install_dir=install_dir,
+        reader=capturing_reader,
     )
+
+    def _busiest(states: list):
+        occupied = [s for s in states if sum(z.occupancy or 0 for z in s.zones) > 0]
+        if not occupied:
+            return None
+        return max(occupied, key=lambda s: sum(z.occupancy or 0 for z in s.zones))
 
     def plan_provider(now: datetime):
         nonlocal rate_history
-        state = driver.read_state()
-        if state is None:
-            log.info("chunk at %s: no prior observation yet - baseline", now)
+        if not use_agent:
+            return None  # constant arm: hold the flat baseline, identical chunking as the agent
+        anchor_state = _busiest(prev_states)
+        if anchor_state is None:
+            log.info("chunk at %s: no occupied prior day yet - baseline", now)
             return None
-        digest = build_digest(state, forecast=forecast(now))
+        digest = build_digest(anchor_state, forecast=forecast(now))
         plan = planner.plan(digest, now=now, trigger=TriggerEnum.HOURLY)
         if plan is None:
             log.warning("chunk at %s: planner returned no plan - baseline", now)
             return None
         setpoints = plan.to_setpoint_plan(now=now, baseline=baseline_map)
-        verdicts = [guardian.filter(setpoints, zone, rate_history) for zone in state.zones]
+        verdicts = [guardian.filter(setpoints, zone, rate_history) for zone in anchor_state.zones]
         for verdict in verdicts:
             for step in verdict.safe_plan.steps:
                 rate_history = rate_history.record(step.zone, now, step.value)
@@ -107,7 +128,8 @@ def run_receding_agent_arm(
     driver.plan_provider = plan_provider
     exit_code = driver.run()
     driver.store.close()
-    log.info("receding agent arm: exit=%s %s", exit_code, driver.stats.summary())
+    log.info("receding %s arm: exit=%s %s", "agent" if use_agent else "constant", exit_code,
+             driver.stats.summary())
     return out_dir
 
 
@@ -128,32 +150,42 @@ def _aggregate_kpis(out_dir: Path, tariff_path: Path, carbon_path: Path) -> dict
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Agent-arm economics via receding-horizon mode.")
-    parser.add_argument("--timeout", type=float, default=150.0)
-    parser.add_argument("--baseline-sql", type=Path, required=True,
-                         help="eplusout.sql from a real baseline arm run, same RunPeriod")
+    parser.add_argument("--timeout", type=float, default=200.0)
     args = parser.parse_args(argv)
 
     settings = Settings.from_env()
     install_dir = eplus_path.require_energyplus()
     spec = hottest_week(settings.epw_path)
-    out_dir = settings.repo_root / RESULTS_ROOT / f"receding_agent_{datetime.now():%Y%m%dT%H%M%S}"
+    stamp = f"{datetime.now():%Y%m%dT%H%M%S}"
+    agent_dir = settings.repo_root / RESULTS_ROOT / f"receding_{stamp}" / "agent"
+    const_dir = settings.repo_root / RESULTS_ROOT / f"receding_{stamp}" / "constant"
 
-    run_receding_agent_arm(settings, spec, out_dir=out_dir, install_dir=install_dir,
-                            timeout_s=args.timeout)
+    # Both arms run the *same* chunked simulation on the same agentic.idf - the only difference
+    # is whether the agent's plans drive the setpoints or they are held flat. Comparing the two
+    # cancels the per-chunk cold-start artifact and isolates the agent's own contribution (this
+    # is the honest "constant -> agent" number, free of the lost-setback confound).
+    run_receding_agent_arm(settings, spec, out_dir=const_dir, install_dir=install_dir,
+                            timeout_s=args.timeout, use_agent=False)
+    run_receding_agent_arm(settings, spec, out_dir=agent_dir, install_dir=install_dir,
+                            timeout_s=args.timeout, use_agent=True)
 
     tariff_path = settings.data_dir / "tariff.csv"
     carbon_path = settings.data_dir / "carbon_intensity.csv"
-    agent_kpis = _aggregate_kpis(out_dir, tariff_path, carbon_path)
-    baseline_kpis = compute_kpis(args.baseline_sql, tariff_path, carbon_path, run_label="baseline")
+    const_kpis = _aggregate_kpis(const_dir, tariff_path, carbon_path)
+    agent_kpis = _aggregate_kpis(agent_dir, tariff_path, carbon_path)
 
-    print(f"\nbaseline : {baseline_kpis.site_kwh:.1f} kWh, INR {baseline_kpis.cost_inr:.1f}, "
-          f"{baseline_kpis.carbon_kg:.2f} kg, peak {baseline_kpis.peak_demand_kw:.2f} kW")
+    print("\n=== receding-horizon comparison (same chunked sim, agent plans vs held flat) ===")
+    print(f"constant : {const_kpis['site_kwh']:.1f} kWh, INR {const_kpis['cost_inr']:.1f}, "
+          f"{const_kpis['carbon_kg']:.2f} kg, peak {const_kpis['peak_demand_kw']:.2f} kW")
     print(f"agent    : {agent_kpis['site_kwh']:.1f} kWh, INR {agent_kpis['cost_inr']:.1f}, "
           f"{agent_kpis['carbon_kg']:.2f} kg, peak {agent_kpis['peak_demand_kw']:.2f} kW")
-    if baseline_kpis.site_kwh:
-        pct = 100 * (baseline_kpis.site_kwh - agent_kpis["site_kwh"]) / baseline_kpis.site_kwh
-        print(f"site kWh delta (baseline -> agent): {pct:+.1f}%")
-    print(f"out_dir: {out_dir}")
+    if const_kpis["site_kwh"]:
+        d_kwh = 100 * (const_kpis["site_kwh"] - agent_kpis["site_kwh"]) / const_kpis["site_kwh"]
+        d_cost = const_kpis["cost_inr"] - agent_kpis["cost_inr"]
+        d_carbon = const_kpis["carbon_kg"] - agent_kpis["carbon_kg"]
+        print(f"\nagent contribution: site kWh {d_kwh:+.1f}%  |  cost {d_cost:+.1f} INR  "
+              f"|  carbon {d_carbon:+.1f} kg  (positive = agent saved)")
+    print(f"\nout: {agent_dir.parent}")
     return 0
 
 
