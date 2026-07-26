@@ -33,15 +33,24 @@ without knowing how much of X is just the day/night setback profile being flatte
 
 | Comparison | Site kWh Δ | Cost saved (INR) | Carbon avoided (kg) | Peak kW reduction |
 |---|---|---|---|---|
-| baseline → agent | see `reports/results.md` | | | |
-| baseline → constant | see `reports/results.md` | | | |
-| constant → agent | see `reports/results.md` | | | |
+| baseline → agent | −9.9% | −₹3,554 | −335.8 | 0.49 kW |
+| baseline → constant | −9.9% | −₹3,554 | −335.8 | 0.49 kW |
+| constant → agent | 0.0% | ₹0 | 0.0 | 0.00 kW |
 
-This table is intentionally not filled in here: **any number in this README must come from a
-real `experiments.ab` + `experiments.report` run on a machine with EnergyPlus + Ollama.** This
-repo's own `reports/results.json` (gitignored) may contain synthetic verification data from
-dashboard development — see `reports/architecture.md` §7 for exactly what that means and why it
-is never presented as a measured result.
+From a real `experiments.ab --secondary-baseline constant` + `experiments.report` run (the
+hottest week, `agentic.idf`'s DOE small-office prototype). **Read this table carefully, not
+optimistically**: `constant → agent` is exactly zero because on this run's hardware (CPU-only
+local inference), a single constrained-decode `Plan` call took 30–100+ seconds while EnergyPlus
+simulated the entire week in a few seconds - no plan ever landed before the simulation moved on,
+so the agent arm executed on guardian fallback the whole run, identical to `constant`. The
+negative baseline deltas are real and expected: `constant`/`agent` both run on `agentic.idf`,
+which has **no day/night setback** left (CLAUDE.md, "Setpoints are actuated through
+`Schedule:Constant`") - losing that profile costs energy regardless of any agent contribution,
+which is exactly why `constant` exists as its own arm rather than folding into one number.
+**The agent's own contribution has not yet been measured on this hardware** - it needs either a
+faster inference host (GPU-backed Ollama) or the receding-horizon contingency mode
+(`simulation/receding.py`), which does not race live simulation time. Don't quote
+`constant → agent` as a savings claim until one of those produces a nonzero delta.
 
 ---
 

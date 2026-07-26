@@ -153,11 +153,26 @@ def _load_idf(idf_path: Path, install_dir: Path):
 
 def patch_idf(idf, spec: RunPeriodSpec, *, timesteps_per_hour: int = 6):
     """Set the RunPeriod, timestep, SQLite output and required meters on ``idf`` in place."""
+    _ensure_weather_run_period_enabled(idf)
     _set_run_period(idf, spec)
     _set_timestep(idf, timesteps_per_hour)
     _ensure_sqlite(idf)
     _ensure_meters(idf, REQUIRED_METERS)
     return idf
+
+
+def _ensure_weather_run_period_enabled(idf) -> None:
+    """Force ``SimulationControl`` to actually run the weather-file RunPeriod.
+
+    The DOE prototype IDFs ship with this set to ``No`` (they are meant as sizing-only
+    reference files) - every RunPeriod set above would otherwise be silently skipped, and
+    EnergyPlus would simulate only the two HVAC-sizing design days (their own fixed nominal
+    dates - which is exactly why an unfiltered read of the SQL output can appear to span
+    January to July: those are the sizing days, not the RunPeriod).
+    """
+    controls = idf.idfobjects.get("SIMULATIONCONTROL", [])
+    control = controls[0] if controls else idf.newidfobject("SIMULATIONCONTROL")
+    control.Run_Simulation_for_Weather_File_Run_Periods = "Yes"
 
 
 def _set_run_period(idf, spec: RunPeriodSpec) -> None:
