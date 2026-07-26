@@ -1,0 +1,16 @@
+# HIVE dashboard theme. Amber-on-charcoal ("hive" palette). Streamlit reads this when run
+# from the repo root; the launch config also passes the same values as CLI flags so the theme
+# holds regardless of the working directory.
+[theme]
+base = "dark"
+primaryColor = "#f59f00"
+backgroundColor = "#12141c"
+secondaryBackgroundColor = "#1b1e29"
+textColor = "#e9ecef"
+font = "sans serif"
+
+[server]
+headless = true
+
+[browser]
+gatherUsageStats = false

@@ -32,6 +32,7 @@ MODULES = [
     "agent.planner",
     "agent.prompts",
     "agent.scheduler",
+    "dashboard.app",
     "common.config",
     "common.eplus_path",
     "common.generated_enums",

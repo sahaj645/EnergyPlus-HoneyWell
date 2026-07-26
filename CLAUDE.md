@@ -113,17 +113,40 @@ media/        demo video
   directory. `common/eplus_path.py` appends `$ENERGYPLUS_DIR` to `sys.path` at import time.
   Import it before anything that touches the runtime API. CI has no EnergyPlus, so nothing
   in the test suite may require it at import time.
-- **Current state: baseline + closed loop + guardian + planner + MCP/events/cache + A/B/
-  endurance landed.** Implemented: `simulation/{fetch_assets,run_baseline,prepare_idf,idf_io,
-  snapshots,patching,receding}.py`, `agent/{bus,digest,planner,scheduler,prompts,events,
-  cache}.py`, `common/{store,planslot,generated_enums}.py`,
+- **Current state: full pipeline + live dashboard landed.** Implemented:
+  `simulation/{fetch_assets,run_baseline,prepare_idf,idf_io,snapshots,patching,receding}.py`,
+  `agent/{bus,digest,planner,scheduler,prompts,events,cache}.py`,
+  `common/{store,planslot,generated_enums}.py`,
   `guardian/{core,executor,watchdog,fallback,supervisor,limits}.py`,
   `mcp_server/{server,tools,providers}.py`,
-  `experiments/{kpis,smoke_roundtrip,smoke_llm_loop,mcp_exercise,ab,report,endurance}.py`.
-  Still `NotImplementedError` stubs by design: `agent/ollama_client.py` (superseded by
-  `agent/planner.py`), `agent/plan_cache.py` (superseded by `agent/cache.py`),
-  `experiments/ab_harness.py` (superseded by `experiments/ab.py`), `experiments/kpi_extract.py`,
-  `dashboard/app.py`.
+  `experiments/{kpis,smoke_roundtrip,smoke_llm_loop,mcp_exercise,ab,report,endurance}.py`,
+  `dashboard/{app,export_screens}.py`. Still `NotImplementedError` stubs by design:
+  `agent/ollama_client.py` (superseded by `agent/planner.py`), `agent/plan_cache.py`
+  (superseded by `agent/cache.py`), `experiments/ab_harness.py` (superseded by
+  `experiments/ab.py`), `experiments/kpi_extract.py`.
+
+### The dashboard is read-only over WAL - it never opens a write connection
+
+`dashboard/app.py` (Streamlit, single page, ~5 s auto-refresh via `st.fragment(run_every=)`)
+reads the telemetry SQLite through `common.store.reader` (the `query_only` pragma), the A/B
+`reports/results.json`, and the endurance `checkpoint.json` - **nothing on screen is
+hardcoded**, and it is safe to point at the database of a *running* endurance sim because WAL
+readers never block the writer (proven: reader saw 900→984 rows grow live). Five sections in
+fixed order: headline strip, cumulative-kWh race chart (tariff/carbon high-band hours shaded,
+pre-cool windows overlaid), per-zone PMV strip (±0.5 envelope), decision journal
+(`plans`⋈`llm_calls` for cache-vs-call, `guardian_events` for the verdict), LLMOps
+(calls/avoided, tokens, p50/p95 latency, retries, verdict counts, timeouts, ₹-saved vs a
+**labeled** API-price assumption, endurance card). Aggregation is SQL-side (`GROUP BY`/filtered
+selects, band shading merged into a dozen rects); a week loads in <0.5 s.
+
+- **`?section=N&static=1`** renders exactly one section with auto-refresh off - that is what
+  `dashboard/export_screens.py` screenshots. Capture is **CDP-driven** (open a page target on
+  a headless Edge/Chrome, poll the DOM until the section's content actually mounted, *then*
+  capture) - `--screenshot`/`--virtual-time-budget` fire before Streamlit's websocket paints
+  and yield blanks. Screenshots land in `reports/screens/` (gitignored, regenerated per run).
+- **`llm_calls` gained `prompt_tokens`/`completion_tokens`/`retries`** this session. `init_db`
+  now runs an idempotent `ALTER TABLE ... ADD COLUMN` migration (`_MIGRATIONS`) so databases
+  from older builds keep working - `CREATE TABLE IF NOT EXISTS` alone cannot retrofit columns.
 
 ### The A/B harness is the scored run - three arms, identical conditions
 

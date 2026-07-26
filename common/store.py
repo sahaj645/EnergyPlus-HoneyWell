@@ -84,15 +84,18 @@ CREATE TABLE IF NOT EXISTS guardian_events (
 CREATE INDEX IF NOT EXISTS ix_guardian_at ON guardian_events (at);
 
 CREATE TABLE IF NOT EXISTS llm_calls (
-    id           INTEGER PRIMARY KEY,
-    run_id       TEXT,
-    at           TEXT NOT NULL,
-    model        TEXT,
-    latency_ms   REAL,
-    ok           INTEGER NOT NULL DEFAULT 1,
-    error        TEXT,
-    prompt       TEXT,
-    response     TEXT
+    id                INTEGER PRIMARY KEY,
+    run_id            TEXT,
+    at                TEXT NOT NULL,
+    model             TEXT,
+    latency_ms        REAL,
+    ok                INTEGER NOT NULL DEFAULT 1,
+    error             TEXT,
+    prompt            TEXT,
+    response          TEXT,
+    prompt_tokens     INTEGER,
+    completion_tokens INTEGER,
+    retries           INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS ix_llm_at ON llm_calls (at);
 
@@ -145,11 +148,29 @@ def connect(db_path: Path | str, *, read_only: bool = False) -> sqlite3.Connecti
     return conn
 
 
+#: Columns added after the original schema shipped. ``CREATE TABLE IF NOT EXISTS`` cannot
+#: retrofit them onto a database created by an older build, so :func:`init_db` ALTERs them in
+#: when absent. SQLite's ADD COLUMN is metadata-only - instant even on a month of telemetry.
+_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
+    ("llm_calls", "prompt_tokens", "INTEGER"),
+    ("llm_calls", "completion_tokens", "INTEGER"),
+    ("llm_calls", "retries", "INTEGER NOT NULL DEFAULT 0"),
+)
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    for table, column, ddl in _MIGRATIONS:
+        present = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if column not in present:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+
+
 def init_db(db_path: Path | str) -> None:
-    """Create the schema if it does not exist. Safe to call repeatedly."""
+    """Create the schema if it does not exist, and migrate older files. Safe to repeat."""
     conn = connect(db_path)
     try:
         conn.executescript(SCHEMA)
+        _migrate(conn)
     finally:
         conn.close()
 
@@ -350,14 +371,19 @@ class TelemetryStore:
         response: str | None = None,
         run_id: str | None = None,
         at: datetime | None = None,
+        prompt_tokens: int | None = None,
+        completion_tokens: int | None = None,
+        retries: int = 0,
     ) -> None:
         """Journal one call to the planner - including the failures, which are the interesting
-        ones when explaining a fallback."""
+        ones when explaining a fallback. Token counts come from Ollama's own eval counters
+        (``prompt_eval_count``/``eval_count``); they feed the dashboard's LLMOps panel."""
         with self._transaction():
             self._conn.execute(
                 "INSERT INTO llm_calls "
-                "(run_id, at, model, latency_ms, ok, error, prompt, response) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "(run_id, at, model, latency_ms, ok, error, prompt, response, "
+                " prompt_tokens, completion_tokens, retries) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     run_id,
                     _iso(at or datetime.now(UTC)),
@@ -367,6 +393,9 @@ class TelemetryStore:
                     error,
                     prompt,
                     response,
+                    prompt_tokens,
+                    completion_tokens,
+                    int(retries),
                 ),
             )
 

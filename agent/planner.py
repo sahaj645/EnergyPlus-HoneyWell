@@ -113,6 +113,9 @@ class Planner:
                 response=attempt.plan.model_dump_json() if attempt.plan else attempt.error,
                 run_id=self.run_id,
                 at=now,
+                prompt_tokens=attempt.prompt_tokens,
+                completion_tokens=attempt.completion_tokens,
+                retries=attempt.retries,
             )
         if attempt.plan is None:
             return None

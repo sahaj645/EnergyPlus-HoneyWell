@@ -42,6 +42,18 @@ htmlcov/
 *.sqlite-shm
 *.sqlite3
 *.db
+*_cache_stats.json
+cache_stats.json
+
+# --- Per-machine run outputs + reports (generated; packaged at submission, not committed) ---
+experiments/results/
+reports/results.json
+reports/results.md
+
+# --- Dashboard screenshots (regenerated via dashboard/export_screens.py) ---
+reports/screens/*
+!reports/screens/.gitkeep
+!reports/screens/README.md
 
 # --- EnergyPlus simulation assets (fetched, not committed: size + licensing) ---
 simulation/baseline.idf
