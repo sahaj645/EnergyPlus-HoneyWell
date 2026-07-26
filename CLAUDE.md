@@ -113,14 +113,61 @@ media/        demo video
   directory. `common/eplus_path.py` appends `$ENERGYPLUS_DIR` to `sys.path` at import time.
   Import it before anything that touches the runtime API. CI has no EnergyPlus, so nothing
   in the test suite may require it at import time.
-- **Current state: baseline + closed loop + model-versioning + guardian landed; planner still
-  stubbed.** Implemented: `simulation/{fetch_assets,run_baseline,prepare_idf,idf_io,snapshots,
-  patching,receding}.py`, `agent/bus.py`, `common/{store,planslot}.py`,
+- **Current state: baseline + closed loop + guardian + LLM planner landed.** Implemented:
+  `simulation/{fetch_assets,run_baseline,prepare_idf,idf_io,snapshots,patching,receding}.py`,
+  `agent/{bus,digest,planner,scheduler,prompts}.py`, `common/{store,planslot,generated_enums}.py`,
   `guardian/{core,executor,watchdog,fallback,supervisor,limits}.py`,
-  `experiments/{kpis,smoke_roundtrip}.py`. Still `NotImplementedError` stubs by design:
-  `agent/ollama_client.py`, `agent/digest.py`, `agent/plan_cache.py`, `mcp_server/*`,
-  `dashboard/app.py`, `experiments/{ab_harness,endurance,kpi_extract}.py`. Do not mistake a
-  stub for a regression.
+  `experiments/{kpis,smoke_roundtrip,smoke_llm_loop}.py`. Still `NotImplementedError` stubs by
+  design: `agent/ollama_client.py` (superseded by `agent/planner.py`), `agent/plan_cache.py`,
+  `mcp_server/*`, `dashboard/app.py`, `experiments/{ab_harness,endurance,kpi_extract}.py`.
+
+### Two plan contracts: `Plan` (LLM) and `SetpointPlan` (actuation)
+
+R4 says `common/models.py` holds the plan schema; there are now **two levels** of it, and
+mixing them up is the easy mistake:
+
+- **`Plan` / `PlanAction`** — what the **LLM emits**. Enum-typed `zone`/`actuator` (codegen'd),
+  a value window (`start`/`end`), per-action `rationale`, an `ecms` playbook, a `trigger`, and
+  `horizon_hours` (4–6). `Plan.model_json_schema()` is the constrained-decoding grammar handed
+  to Ollama (`format=`).
+- **`SetpointPlan` / `PlanStep`** — what the **guardian and executor** operate on: flat,
+  relative-time (`offset_minutes`) setpoint moves. This is the old `Plan`, renamed this session.
+- **`Plan.to_setpoint_plan(now, baseline)`** lowers one to the other. The **scheduler** does
+  this before `planslot.commit()`; the slot holds a `SetpointPlan`. `ApprovedPlan` (guardian
+  output) is unchanged.
+
+If you write `Plan(steps=...)` you want `SetpointPlan`. If you want `actions`/`ecms`/`trigger`
+you want `Plan`.
+
+### Zone/Actuator enums are codegen'd from the IDF
+
+`common/generated_enums.py` (`ZoneEnum`, `ActuatorEnum`) is **generated** by
+`simulation/prepare_idf.py` (`render_generated_enums`/`emit_enums`) from the prepared model, so
+the LLM is constrained at decode time to name only zones/actuators that exist. A **default** is
+committed so the package imports with no IDF prepared (CI/tests); `prepare_idf` rewrites it in
+place from the real model. `GENERATED_FROM` starting with "default" means it has not been
+regenerated yet. Do not hand-edit it.
+
+### The planner never runs on the callback thread
+
+`agent/planner.py` (Ollama, `temperature=0`, `format=schema`, `keep_alive`, one-shot L1 schema
+repair, logs every call to `llm_calls`) is called only by `agent/scheduler.py`, which runs it on
+a **worker thread**. The callback calls `Scheduler.on_timestep` (cheap, non-blocking); the
+worker builds the digest, plans, lowers, and commits to the slot. Triggers: startup + hourly
+(sim time); event is a stubbed `EventDetector` for Session 6. Hard 30 s wall-clock budget;
+late results are discarded via an epoch check. The digest reads a callback-captured state
+snapshot, never the live E+ exchange (that is callback-thread-only).
+
+- **System prompt is a byte-identical constant** (`agent/prompts.py`) — editing it invalidates
+  the prompt-prefix cache that `keep_alive` relies on. Digest trails it; schema leads via
+  `format=`. `agent/digest.py` renders a <=1.5K-token, deterministic, fixed-vocabulary digest
+  (arrows `up/down/flat`, bands `low/mid/high`); the `PREVIOUS PLAN FEEDBACK` section is empty
+  until Session 9.
+- **`TelemetryStore` is now thread-safe** (reentrant lock): the callback writes telemetry while
+  the planner worker writes `llm_calls`/`plans` on the same connection.
+- Exit gate: `python -m experiments.smoke_llm_loop` (one live day; >=1 accepted plan actuated)
+  and `python -m experiments.smoke_llm_loop --timeout 0.1` (every cycle preempted, day still
+  completes on baseline).
 
 ### The guardian: `guardian/core.py` is the safety kernel
 

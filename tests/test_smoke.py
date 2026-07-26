@@ -27,9 +27,12 @@ MODULES = [
     "agent.digest",
     "agent.ollama_client",
     "agent.plan_cache",
+    "agent.planner",
     "agent.prompts",
+    "agent.scheduler",
     "common.config",
     "common.eplus_path",
+    "common.generated_enums",
     "common.log",
     "common.models",
     "common.planslot",
@@ -38,6 +41,7 @@ MODULES = [
     "experiments.endurance",
     "experiments.kpi_extract",
     "experiments.kpis",
+    "experiments.smoke_llm_loop",
     "experiments.smoke_roundtrip",
     "guardian.core",
     "guardian.executor",
@@ -77,7 +81,7 @@ def test_eplus_path_is_soft_when_energyplus_absent() -> None:
 
 def test_plan_schema_is_the_single_source_of_truth() -> None:
     """The plan contract must be constructible and JSON-schema-able (constrained decoding)."""
-    from common.models import Actuator, Plan, PlanStep
+    from common.models import Actuator, PlanStep, SetpointPlan
 
     step = PlanStep(
         offset_minutes=0,
@@ -85,8 +89,8 @@ def test_plan_schema_is_the_single_source_of_truth() -> None:
         actuator=Actuator.COOLING_SETPOINT_C,
         value=25.0,
     )
-    plan = Plan(planner_model="test", steps=[step], rationale="smoke")
+    plan = SetpointPlan(planner_model="test", steps=[step], rationale="smoke")
 
     assert plan.horizon_minutes > 0
     assert plan.steps[0].actuator is Actuator.COOLING_SETPOINT_C
-    assert "properties" in Plan.model_json_schema()
+    assert "properties" in SetpointPlan.model_json_schema()

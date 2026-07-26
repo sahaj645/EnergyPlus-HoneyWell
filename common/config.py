@@ -38,6 +38,10 @@ class Settings(BaseModel):
     # --- planner ---
     ollama_host: str = Field(default="http://localhost:11434")
     ollama_model: str = Field(default="qwen2.5:7b-instruct-q4_K_M")
+    ollama_keep_alive: str = Field(
+        default="30m",
+        description="Ollama keep_alive: keep the model resident between planning cycles.",
+    )
     planner_timeout_s: float = Field(default=30.0, gt=0)
     plan_interval_minutes: int = Field(default=15, gt=0)
 
@@ -59,6 +63,7 @@ class Settings(BaseModel):
             output_dir=Path(_env("HIVE_OUTPUT_DIR", str(REPO_ROOT / "simulation" / "out"))),
             ollama_host=_env("OLLAMA_HOST", "http://localhost:11434"),
             ollama_model=_env("HIVE_OLLAMA_MODEL", "qwen2.5:7b-instruct-q4_K_M"),
+            ollama_keep_alive=_env("HIVE_OLLAMA_KEEP_ALIVE", "30m"),
             planner_timeout_s=float(_env("HIVE_PLANNER_TIMEOUT_S", "30")),
             plan_interval_minutes=int(_env("HIVE_PLAN_INTERVAL_MIN", "15")),
             telemetry_flush_every_timesteps=int(_env("HIVE_TELEMETRY_FLUSH_STEPS", "12")),

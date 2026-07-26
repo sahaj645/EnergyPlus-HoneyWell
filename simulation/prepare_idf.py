@@ -300,6 +300,91 @@ def ensure_outputs(idf, zones: list[str], people_names: list[str]) -> None:
 
 
 # --------------------------------------------------------------------------------------
+# Enum codegen: the planner's closed vocabulary, from the real model
+# --------------------------------------------------------------------------------------
+
+#: Which wired ZoneBinding attributes map to which ActuatorEnum member.
+_ACTUATOR_ENUM_MEMBERS: tuple[tuple[str, str, str], ...] = (
+    ("cooling_schedule", "COOLING_SETPOINT_C", "cooling_setpoint_c"),
+    ("heating_schedule", "HEATING_SETPOINT_C", "heating_setpoint_c"),
+)
+
+
+def _enum_member_name(zone: str) -> str:
+    """Turn a zone name into a valid, stable Python enum identifier."""
+    cleaned = "".join(ch if ch.isalnum() else "_" for ch in zone).strip("_").upper()
+    if not cleaned:
+        cleaned = "ZONE"
+    if cleaned[0].isdigit():
+        cleaned = f"Z_{cleaned}"
+    return cleaned
+
+
+def render_generated_enums(model: PreparedModel) -> str:
+    """Render ``common/generated_enums.py`` from a prepared model. Pure - no eppy, no I/O.
+
+    ``ZoneEnum`` gets one member per zone; ``ActuatorEnum`` one per actuator that at least one
+    zone actually wires. De-duplicates enum identifiers defensively (two zones cannot collide
+    onto one member, or the LLM could not tell them apart).
+    """
+    seen: dict[str, str] = {}
+    zone_lines: list[str] = []
+    for binding in model.zones:
+        member = _enum_member_name(binding.zone)
+        base, suffix = member, 2
+        while member in seen and seen[member] != binding.zone:
+            member = f"{base}_{suffix}"
+            suffix += 1
+        seen[member] = binding.zone
+        zone_lines.append(f'    {member} = "{binding.zone}"')
+
+    wired = {
+        attribute
+        for binding in model.zones
+        for attribute, _, _ in _ACTUATOR_ENUM_MEMBERS
+        if getattr(binding, attribute, None)
+    }
+    actuator_lines = [
+        f'    {name} = "{value}"'
+        for attribute, name, value in _ACTUATOR_ENUM_MEMBERS
+        if attribute in wired
+    ]
+
+    if not zone_lines:
+        zone_lines = ['    PLACEHOLDER = "PLACEHOLDER_ZONE"']
+    if not actuator_lines:
+        actuator_lines = ['    COOLING_SETPOINT_C = "cooling_setpoint_c"']
+
+    zones_block = "\n".join(zone_lines)
+    actuators_block = "\n".join(actuator_lines)
+    return (
+        '"""Zone and actuator enums for the planner contract - CODE-GENERATED from the IDF.\n'
+        "\n"
+        "**Do not hand-edit.** Regenerate with `python -m simulation.prepare_idf`.\n"
+        "These are the closed vocabulary the LLM is constrained to during decoding.\n"
+        '"""\n\n'
+        "from __future__ import annotations\n\n"
+        "from enum import StrEnum\n\n"
+        f'GENERATED_FROM = "{model.idf_path}"\n\n\n'
+        "class ZoneEnum(StrEnum):\n"
+        '    """Conditioned thermal zones. Values match the IDF zone names exactly."""\n\n'
+        f"{zones_block}\n\n\n"
+        "class ActuatorEnum(StrEnum):\n"
+        '    """Actuators the planner may address. A subset of `common.models.Actuator`."""\n\n'
+        f"{actuators_block}\n\n\n"
+        '__all__ = ["GENERATED_FROM", "ActuatorEnum", "ZoneEnum"]\n'
+    )
+
+
+def emit_enums(model: PreparedModel, out_path: Path) -> Path:
+    """Write the generated enums for ``model`` to ``out_path``."""
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(render_generated_enums(model), encoding="utf-8")
+    log.info("wrote %s (%d zones)", out_path, len(model.zones))
+    return out_path
+
+
+# --------------------------------------------------------------------------------------
 # Orchestration
 # --------------------------------------------------------------------------------------
 
@@ -344,6 +429,10 @@ def prepare(
     )
     model.save(index_path)
 
+    # Codegen the planner's zone/actuator vocabulary from the real model, next to models.py.
+    enums_path = Path(__file__).resolve().parent.parent / "common" / "generated_enums.py"
+    emit_enums(model, enums_path)
+
     missing_pmv = [z.zone for z in model.zones if not z.people]
     if missing_pmv:
         log.warning("no People object for zones %s - PMV will be unavailable there", missing_pmv)
@@ -380,11 +469,13 @@ __all__ = [
     "SITE_VARIABLES",
     "ZONE_VARIABLES",
     "convert_setpoint_schedules",
+    "emit_enums",
     "ensure_fanger_comfort",
     "ensure_outputs",
     "numeric_fields",
     "occupied_setpoint",
     "prepare",
+    "render_generated_enums",
 ]
 
 

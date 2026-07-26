@@ -14,8 +14,8 @@ from common.models import (
     Actuator,
     BuildingState,
     GuardianDecision,
-    Plan,
     PlanStep,
+    SetpointPlan,
     ViolationCode,
     ZoneState,
 )
@@ -41,8 +41,8 @@ def state(cooling: float = 24.0, heating: float = 21.0) -> BuildingState:
     )
 
 
-def plan_with(*steps: PlanStep) -> Plan:
-    return Plan(planner_model="test", steps=list(steps))
+def plan_with(*steps: PlanStep) -> SetpointPlan:
+    return SetpointPlan(planner_model="test", steps=list(steps))
 
 
 def step(value: float, *, actuator: Actuator = Actuator.COOLING_SETPOINT_C, zone: str = ZONE,

@@ -39,8 +39,8 @@ from common.models import (
     GuardianDecision,
     GuardianStatus,
     GuardianVerdict,
-    Plan,
     PlanStep,
+    SetpointPlan,
     ZoneState,
 )
 from guardian.limits import DEFAULT_CONFIG, GuardianConfig
@@ -127,7 +127,7 @@ class Guardian:
 
     # -- the pure entry point ----------------------------------------------------------
 
-    def filter(self, plan: Plan, state: ZoneState, history: RateHistory) -> GuardianVerdict:
+    def filter(self, plan: SetpointPlan, state: ZoneState, history: RateHistory) -> GuardianVerdict:
         """Filter ``plan`` for the single zone described by ``state``.
 
         Pure: no mutation of ``history`` (the executor records the *applied* value afterwards),

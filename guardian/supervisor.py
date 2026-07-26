@@ -26,8 +26,8 @@ from common.models import (
     BuildingState,
     GuardianDecision,
     GuardianEvent,
-    Plan,
     PlanStep,
+    SetpointPlan,
     Violation,
     ViolationCode,
 )
@@ -47,7 +47,7 @@ class Guardian:
     def __init__(self, limits: GuardianLimits = DEFAULT_LIMITS) -> None:
         self.limits = limits
 
-    def review(self, plan: Plan, state: BuildingState) -> ApprovedPlan:
+    def review(self, plan: SetpointPlan, state: BuildingState) -> ApprovedPlan:
         """Clamp, rate-limit and validate ``plan``. Always returns an actuatable result.
 
         Order of checks is part of the contract, because each stage's output feeds the next:
@@ -254,7 +254,7 @@ class Guardian:
         return cls._observed_setpoint(step.zone, observed, attribute)
 
     def _decide(
-        self, plan: Plan, approved: list[PlanStep], violations: list[Violation]
+        self, plan: SetpointPlan, approved: list[PlanStep], violations: list[Violation]
     ) -> GuardianDecision:
         if plan.steps and not approved:
             return GuardianDecision.REJECTED
@@ -264,7 +264,7 @@ class Guardian:
 
     # -- journalling -------------------------------------------------------------------
 
-    def journal(self, plan: Plan, approved: ApprovedPlan) -> GuardianEvent:
+    def journal(self, plan: SetpointPlan, approved: ApprovedPlan) -> GuardianEvent:
         """Build the journal row for a completed review."""
         return GuardianEvent(
             plan_id=plan.plan_id,

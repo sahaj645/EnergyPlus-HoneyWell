@@ -26,6 +26,8 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from common.generated_enums import ActuatorEnum, ZoneEnum
+
 SCHEMA_VERSION = 1
 
 
@@ -69,6 +71,32 @@ class GuardianDecision(StrEnum):
     ACCEPTED = "accepted"
     CLAMPED = "clamped"
     REJECTED = "rejected"
+
+
+class TriggerEnum(StrEnum):
+    """Why a planning cycle ran. ``EVENT`` is the Session 6 event-detector hook."""
+
+    STARTUP = "startup"
+    HOURLY = "hourly"
+    EVENT = "event"
+
+
+class EcmEnum(StrEnum):
+    """The energy-conservation-measure playbook the planner may invoke.
+
+    A fixed, closed vocabulary the LLM is constrained to - not free text - so a plan's strategy
+    is machine-readable on the dashboard and in the journal. The system prompt describes when
+    each applies; the guardian does not act on these (it acts on the resulting setpoints), they
+    are the planner's declared intent.
+    """
+
+    PRECOOL = "precool"  # pull temperature down before a price/carbon peak
+    COAST = "coast"  # let temperature drift within comfort to ride out a peak
+    SETPOINT_RELAX = "setpoint_relax"  # widen setpoints during unoccupied/low-value hours
+    NIGHT_PURGE = "night_purge"  # use cool night air to pre-cool the mass
+    LOAD_SHIFT = "load_shift"  # move cooling work to cheaper/cleaner hours
+    PEAK_LIMIT = "peak_limit"  # cap demand during the evening peak
+    HOLD = "hold"  # no change; the baseline is already the right call
 
 
 class ViolationCode(StrEnum):
@@ -202,13 +230,109 @@ class PreparedModel(_Base):
 # --------------------------------------------------------------------------------------
 # The plan contract
 # --------------------------------------------------------------------------------------
+#
+# Two levels of abstraction, both Pydantic, both here (rule R4):
+#
+# * `Plan` / `PlanAction` - what the **LLM** emits. Rich and human-meaningful: enum-typed zone
+#   and actuator (codegen'd from the IDF), a value window (start/end), a per-action rationale,
+#   an ECM playbook and a trigger. `Plan.model_json_schema()` is the constrained-decoding
+#   grammar handed to Ollama.
+# * `SetpointPlan` / `PlanStep` - what the **guardian and executor** operate on. Flat,
+#   relative-time setpoint moves. The scheduler lowers a `Plan` to a `SetpointPlan`
+#   (`Plan.to_setpoint_plan`) before committing it to the plan slot.
+#
+# `ApprovedPlan` (further down) is the actuation-authorised form the bus accepts; only the
+# guardian builds one.
+
+
+class PlanAction(_Base):
+    """One setpoint intent over a time window - the unit of an LLM :class:`Plan`.
+
+    ``zone`` and ``actuator`` are enums generated from the IDF, so the model is constrained at
+    decode time to name only things that exist. ``value`` carries a coarse physical sanity bound
+    here; the *real*, per-actuator envelope is the guardian's job, not the schema's.
+    """
+
+    zone: ZoneEnum
+    actuator: ActuatorEnum
+    value: float = Field(ge=-10.0, le=100.0)
+    start: datetime
+    end: datetime
+    rationale: str = Field(default="", max_length=120)
+
+    @model_validator(mode="after")
+    def _check_window(self) -> PlanAction:
+        if self.end < self.start:
+            raise ValueError("action end must be at or after start")
+        return self
+
+
+class Plan(_Base):
+    """What the LLM produces. Untrusted until the guardian says otherwise.
+
+    ``Plan.model_json_schema()`` is the constrained-decoding grammar handed to Ollama - keep it
+    small, flat and free of exotic types. Lower it to the guardian's representation with
+    :meth:`to_setpoint_plan`.
+    """
+
+    plan_id: str = Field(default_factory=_new_id)
+    schema_version: int = Field(default=SCHEMA_VERSION)
+    created_at: datetime = Field(default_factory=_now)
+    planner_model: str = Field(default="")
+    trigger: TriggerEnum = Field(default=TriggerEnum.STARTUP)
+    horizon_hours: int = Field(default=6, ge=4, le=6)
+    actions: list[PlanAction] = Field(default_factory=list, max_length=64)
+    ecms: list[EcmEnum] = Field(default_factory=list, max_length=8)
+    confidence: float | None = Field(default=None, ge=0, le=1)
+
+    def to_setpoint_plan(
+        self,
+        *,
+        now: datetime,
+        baseline: dict[tuple[str, str], float] | None = None,
+    ) -> SetpointPlan:
+        """Lower this LLM plan into the flat, relative-time form the guardian consumes.
+
+        Each action becomes a :class:`PlanStep` at ``start`` (offset from ``now``). When a
+        ``baseline`` (``{(zone, actuator): value}``) is supplied, a second step at ``end``
+        reverts the setpoint - so an action's window actually closes instead of holding forever.
+        Offsets are clamped to ``[0, 24h]``; ``now`` is *simulation* time, not wall-clock.
+        """
+        steps: list[PlanStep] = []
+        for action in self.actions:
+            zone = str(action.zone.value)
+            actuator = Actuator(action.actuator.value)
+            start_offset = _offset_minutes(action.start, now)
+            steps.append(
+                PlanStep(
+                    offset_minutes=start_offset, zone=zone, actuator=actuator, value=action.value
+                )
+            )
+            if baseline is not None:
+                revert = baseline.get((zone, str(action.actuator.value)))
+                end_offset = _offset_minutes(action.end, now)
+                if revert is not None and end_offset > start_offset:
+                    steps.append(
+                        PlanStep(
+                            offset_minutes=end_offset, zone=zone, actuator=actuator, value=revert
+                        )
+                    )
+
+        return SetpointPlan(
+            plan_id=self.plan_id,
+            created_at=self.created_at,
+            planner_model=self.planner_model,
+            horizon_minutes=self.horizon_hours * 60,
+            steps=steps,
+            rationale="; ".join(a.rationale for a in self.actions if a.rationale)[:1000],
+        )
 
 
 class PlanStep(_Base):
     """A single setpoint move, relative to the moment the plan was issued.
 
     ``offset_minutes`` is relative rather than absolute so that a plan stays meaningful if it
-    is applied a timestep late - and so the planner never has to reason about wall-clock.
+    is applied a timestep late - and so nothing downstream has to reason about wall-clock.
     """
 
     offset_minutes: int = Field(ge=0, le=24 * 60)
@@ -217,10 +341,12 @@ class PlanStep(_Base):
     value: float
 
 
-class Plan(_Base):
-    """What the LLM produces. Untrusted until the guardian says otherwise.
+class SetpointPlan(_Base):
+    """The guardian/executor representation: flat, relative-time setpoint moves.
 
-    ``Plan.model_json_schema()`` is the constrained-decoding grammar handed to Ollama.
+    Produced by lowering an LLM :class:`Plan`, or built directly by harnesses that actuate
+    without a model (the smoke tests). Distinct from :class:`Plan` so the planner-facing schema
+    and the actuation-facing schema can evolve independently.
     """
 
     plan_id: str = Field(default_factory=_new_id)
@@ -231,6 +357,12 @@ class Plan(_Base):
     steps: list[PlanStep] = Field(default_factory=list, max_length=64)
     rationale: str = Field(default="", max_length=1000)
     confidence: float | None = Field(default=None, ge=0, le=1)
+
+
+def _offset_minutes(when: datetime, now: datetime) -> int:
+    """Minutes from ``now`` to ``when``, clamped to a single day's worth of offset."""
+    delta = (when - now).total_seconds() / 60.0
+    return max(0, min(24 * 60, round(delta)))
 
 
 class Violation(_Base):
@@ -297,15 +429,15 @@ class GuardianVerdict(_Base):
     ``<action>: <zone> <orig>-><new> <rule>`` for clips/rates, ``strip: <zone> <actuator>
     whitelist`` for strips.
 
-    ``safe_plan`` is a :class:`Plan` (not an :class:`ApprovedPlan`) holding only the steps that
-    survived filtering for this zone. Turning it into the ``ApprovedPlan`` the actuator accepts
-    is the guardian's job (rule R2) - see :meth:`guardian.core.Guardian.approve`.
+    ``safe_plan`` is a :class:`SetpointPlan` (not an :class:`ApprovedPlan`) holding only the
+    steps that survived filtering for this zone. Turning it into the ``ApprovedPlan`` the
+    actuator accepts is the guardian's job (rule R2) - see :meth:`guardian.core.Guardian.approve`.
     """
 
     status: GuardianStatus
     zone: str
     reasons: list[str] = Field(default_factory=list)
-    safe_plan: Plan
+    safe_plan: SetpointPlan
 
     @property
     def accepted(self) -> bool:
@@ -521,10 +653,12 @@ class ControlInterface(Protocol):
 __all__ = [
     "SCHEMA_VERSION",
     "Actuator",
+    "ActuatorEnum",
     "AppliedControlState",
     "ApprovedPlan",
     "BuildingState",
     "ControlInterface",
+    "EcmEnum",
     "ForecastPoint",
     "GuardianDecision",
     "GuardianEvent",
@@ -535,12 +669,16 @@ __all__ = [
     "PatchOperation",
     "PatchSpec",
     "Plan",
+    "PlanAction",
     "PlanStep",
     "PreparedModel",
+    "SetpointPlan",
     "SnapshotEntry",
     "SnapshotManifest",
+    "TriggerEnum",
     "Violation",
     "ViolationCode",
     "ZoneBinding",
+    "ZoneEnum",
     "ZoneState",
 ]

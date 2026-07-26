@@ -36,9 +36,9 @@ from common.models import (
     GuardianDecision,
     GuardianEvent,
     GuardianVerdict,
-    Plan,
     PlanStep,
     PreparedModel,
+    SetpointPlan,
 )
 from common.planslot import PlanSlot
 from guardian.core import Guardian, RateHistory
@@ -184,7 +184,7 @@ class Executor:
 
     # -- helpers -----------------------------------------------------------------------
 
-    def _hold(self, plan: Plan, *, anchor: datetime, now: datetime) -> Plan:
+    def _hold(self, plan: SetpointPlan, *, anchor: datetime, now: datetime) -> SetpointPlan:
         """Resolve the in-force value per (zone, actuator): latest step whose offset has elapsed.
 
         Setpoints are step schedules, so "interpolate/hold" is a hold - the most recent step
@@ -213,7 +213,7 @@ class Executor:
 
     def _journal(
         self,
-        plan: Plan,
+        plan: SetpointPlan,
         approved: ApprovedPlan,
         verdicts: list[GuardianVerdict],
         now: datetime,

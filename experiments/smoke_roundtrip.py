@@ -37,7 +37,14 @@ from agent.bus import SimulationBus
 from common import eplus_path
 from common.config import Settings
 from common.log import get_logger
-from common.models import Actuator, ApprovedPlan, BuildingState, Plan, PlanStep, PreparedModel
+from common.models import (
+    Actuator,
+    ApprovedPlan,
+    BuildingState,
+    PlanStep,
+    PreparedModel,
+    SetpointPlan,
+)
 from common.planslot import PlanSlot
 from common.store import TelemetryStore, read_guardian_events, read_telemetry
 from guardian.core import Guardian as CoreGuardian
@@ -160,7 +167,7 @@ def build_dumb_plan(
     start_hour: int = SETBACK_START_HOUR,
     end_hour: int = SETBACK_END_HOUR,
     delta_c: float = SETBACK_DELTA_C,
-) -> Plan:
+) -> SetpointPlan:
     """A hardcoded setback: +``delta_c`` on cooling between the two hours, then back.
 
     Offsets are minutes from the plan anchor. The bus anchors a plan to the simulation time at
@@ -187,7 +194,7 @@ def build_dumb_plan(
                 value=baseline_cooling_c,
             )
         )
-    return Plan(
+    return SetpointPlan(
         planner_model="hardcoded-dumb-plan",
         horizon_minutes=24 * 60,
         steps=steps,
@@ -200,7 +207,7 @@ ABUSIVE_OCCUPIED_SETPOINT_C = 18.0  # below the occupied envelope -> clip
 ABUSIVE_JUMP_C = 5.0  # a 5 C instant move -> rate-limit
 
 
-def build_abusive_plan(model: PreparedModel, baseline_cooling_c: float) -> Plan:
+def build_abusive_plan(model: PreparedModel, baseline_cooling_c: float) -> SetpointPlan:
     """A hardcoded plan that violates all three guardian protections at once.
 
     The three abuses the exit gate is watching for:
@@ -248,7 +255,7 @@ def build_abusive_plan(model: PreparedModel, baseline_cooling_c: float) -> Plan:
             )
         )
 
-    return Plan(
+    return SetpointPlan(
         planner_model="hardcoded-abusive-plan",
         horizon_minutes=24 * 60,
         steps=steps,

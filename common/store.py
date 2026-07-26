@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -31,7 +32,7 @@ from types import TracebackType
 
 import pandas as pd
 
-from common.models import ApprovedPlan, BuildingState, GuardianEvent, Plan
+from common.models import ApprovedPlan, BuildingState, GuardianEvent, Plan, SetpointPlan
 
 DEFAULT_FLUSH_EVERY_TIMESTEPS = 12
 
@@ -188,6 +189,11 @@ class TelemetryStore:
         self._buffer: list[tuple] = []
         self._timesteps_buffered = 0
         self.rows_written = 0
+        # The sim writes telemetry from the callback thread; the planner logs llm_calls/plans
+        # from its worker thread. Both share this one connection, so every mutating method
+        # serialises on this reentrant lock (write_* call flush(), hence RLock). Contention is
+        # near-zero - planner writes are hourly - so the callback path pays nothing measurable.
+        self._lock = threading.RLock()
         init_db(self.db_path)
         self._conn = connect(self.db_path)
 
@@ -226,56 +232,63 @@ class TelemetryStore:
     ) -> None:
         """Buffer one timestep: one row per zone. Flushes on the timestep threshold (R3)."""
         stamp = _iso(state.sim_time)
-        for zone in state.zones:
-            self._buffer.append(
-                (
-                    run_id,
-                    stamp,
-                    zone.zone,
-                    zone.air_temp_c,
-                    zone.pmv,
-                    zone.occupancy,
-                    zone.cooling_setpoint_c,
-                    zone.heating_setpoint_c,
-                    state.outdoor_air_temp_c,
-                    state.facility_power_w,
-                    facility_kwh_step,
+        with self._lock:
+            for zone in state.zones:
+                self._buffer.append(
+                    (
+                        run_id,
+                        stamp,
+                        zone.zone,
+                        zone.air_temp_c,
+                        zone.pmv,
+                        zone.occupancy,
+                        zone.cooling_setpoint_c,
+                        zone.heating_setpoint_c,
+                        state.outdoor_air_temp_c,
+                        state.facility_power_w,
+                        facility_kwh_step,
+                    )
                 )
-            )
-        self._timesteps_buffered += 1
-        if self._timesteps_buffered >= self.flush_every_timesteps:
-            self.flush()
+            self._timesteps_buffered += 1
+            if self._timesteps_buffered >= self.flush_every_timesteps:
+                self.flush()
 
     def flush(self) -> int:
         """Write the buffer in a single transaction. Returns the number of rows written."""
-        self._timesteps_buffered = 0
-        if not self._buffer:
-            return 0
+        with self._lock:
+            self._timesteps_buffered = 0
+            if not self._buffer:
+                return 0
 
-        pending, self._buffer = self._buffer, []
-        with self._transaction():
-            self._conn.executemany(_INSERT_TELEMETRY, pending)
-        self.rows_written += len(pending)
-        return len(pending)
+            pending, self._buffer = self._buffer, []
+            with self._transaction():
+                self._conn.executemany(_INSERT_TELEMETRY, pending)
+            self.rows_written += len(pending)
+            return len(pending)
 
     @contextmanager
     def _transaction(self) -> Iterator[None]:
-        self._conn.execute("BEGIN")
-        try:
-            yield
-        except Exception:
-            self._conn.execute("ROLLBACK")
-            raise
-        else:
-            self._conn.execute("COMMIT")
+        with self._lock:
+            self._conn.execute("BEGIN")
+            try:
+                yield
+            except Exception:
+                self._conn.execute("ROLLBACK")
+                raise
+            else:
+                self._conn.execute("COMMIT")
 
     # -- journal -----------------------------------------------------------------------
     #
     # Low-frequency (one row per planning cycle, not per timestep), so written straight
     # through. Each plan write flushes telemetry first - see the module docstring.
 
-    def write_plan(self, plan: Plan, *, run_id: str | None = None) -> None:
-        """Journal the raw planner output, before the guardian sees it."""
+    def write_plan(self, plan: Plan | SetpointPlan, *, run_id: str | None = None) -> None:
+        """Journal a proposed plan - the raw LLM ``Plan`` or its lowered ``SetpointPlan``.
+
+        Both carry ``plan_id`` / ``created_at`` / ``planner_model`` and serialise via
+        ``model_dump_json``; the ``payload`` records whichever shape it was handed.
+        """
         self.flush()
         with self._transaction():
             self._conn.execute(

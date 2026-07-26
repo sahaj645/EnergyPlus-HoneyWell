@@ -22,14 +22,14 @@ import threading
 from dataclasses import dataclass
 from datetime import datetime
 
-from common.models import Plan
+from common.models import SetpointPlan
 
 
 @dataclass(frozen=True)
 class SlotContents:
     """An internally-consistent snapshot of the slot."""
 
-    plan: Plan
+    plan: SetpointPlan
     committed_at: datetime | None
     generation: int
 
@@ -39,11 +39,11 @@ class PlanSlot:
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._plan: Plan | None = None
+        self._plan: SetpointPlan | None = None
         self._committed_at: datetime | None = None
         self._generation = 0
 
-    def commit(self, plan: Plan, *, at: datetime | None = None) -> int:
+    def commit(self, plan: SetpointPlan, *, at: datetime | None = None) -> int:
         """Replace the held plan. Returns the new generation number.
 
         ``at`` is the *simulation* time of the commit when known (the watchdog measures freshness
@@ -55,7 +55,7 @@ class PlanSlot:
             self._generation += 1
             return self._generation
 
-    def get(self) -> Plan | None:
+    def get(self) -> SetpointPlan | None:
         """Return the latest committed plan, or ``None`` if nothing has been committed.
 
         Non-blocking in practice (the lock is only ever held for a few field assignments) and
