@@ -113,16 +113,72 @@ media/        demo video
   directory. `common/eplus_path.py` appends `$ENERGYPLUS_DIR` to `sys.path` at import time.
   Import it before anything that touches the runtime API. CI has no EnergyPlus, so nothing
   in the test suite may require it at import time.
-- **Current state: baseline + closed loop + guardian + planner + MCP/events/cache landed.**
-  Implemented: `simulation/{fetch_assets,run_baseline,prepare_idf,idf_io,snapshots,patching,
-  receding}.py`, `agent/{bus,digest,planner,scheduler,prompts,events,cache}.py`,
-  `common/{store,planslot,generated_enums}.py`,
+- **Current state: baseline + closed loop + guardian + planner + MCP/events/cache + A/B/
+  endurance landed.** Implemented: `simulation/{fetch_assets,run_baseline,prepare_idf,idf_io,
+  snapshots,patching,receding}.py`, `agent/{bus,digest,planner,scheduler,prompts,events,
+  cache}.py`, `common/{store,planslot,generated_enums}.py`,
   `guardian/{core,executor,watchdog,fallback,supervisor,limits}.py`,
   `mcp_server/{server,tools,providers}.py`,
-  `experiments/{kpis,smoke_roundtrip,smoke_llm_loop,mcp_exercise}.py`. Still
-  `NotImplementedError` stubs by design: `agent/ollama_client.py` (superseded by
+  `experiments/{kpis,smoke_roundtrip,smoke_llm_loop,mcp_exercise,ab,report,endurance}.py`.
+  Still `NotImplementedError` stubs by design: `agent/ollama_client.py` (superseded by
   `agent/planner.py`), `agent/plan_cache.py` (superseded by `agent/cache.py`),
-  `dashboard/app.py`, `experiments/{ab_harness,endurance,kpi_extract}.py`.
+  `experiments/ab_harness.py` (superseded by `experiments/ab.py`), `experiments/kpi_extract.py`,
+  `dashboard/app.py`.
+
+### The A/B harness is the scored run - three arms, identical conditions
+
+`experiments/ab.py` runs **baseline** (`baseline.idf`, unmodified `Schedule:Compact` day/night
+setback - the true control arm), an optional **constant** secondary baseline
+(`--secondary-baseline constant`: a copy of `agentic.idf` with nothing actuating it, isolating
+"lost the setback profile" from "the agent's own contribution"), and **agent** (the full closed
+loop) - all three sharing the same `RunPeriod` (default: the hottest week), EPW, and timestep,
+via one shared IDF-prep function (`prepare_arm_idf`). Neither `baseline.idf` nor `agentic.idf`
+is ever edited in place; each arm gets its own `<label>_patched.idf` under
+`experiments/results/ab_<timestamp>/<label>/`.
+
+- **`run_agent_arm`** (in `ab.py`) is the reusable "run the full live loop over one RunPeriod"
+  building block - the week-long agent arm here, and each day-chunk of `experiments/endurance.py`
+  are both just calls to it with a different `spec`/`out_dir`.
+- Both the constant and baseline arms need PMV to be computable for the comfort table even
+  though `baseline.idf` never goes through `prepare_idf` - so `prepare_arm_idf` also calls
+  `simulation.prepare_idf.ensure_fanger_comfort`/`ensure_outputs` on every arm, not just the
+  agentic ones.
+- Exit gate: `python -m experiments.ab [--secondary-baseline constant]` completes all arms,
+  then `python -m experiments.report --ab-dir <dir>` writes `reports/results.{json,md}`.
+
+### The report reads SQL, computes deltas, prints everything - no filtering
+
+`experiments/report.py` reuses `experiments.kpis.compute_kpis` for the headline numbers (site
+kWh, HVAC subsystem = cooling+fans+pumps electricity, peak kW, cost, carbon - already tested)
+and adds its own full-timestamp SQL reads (`read_meter_series`, `read_zone_series`, reusing
+`experiments.kpis`'s warmup/run-period filtering so the two never disagree about which rows
+count) for the per-day breakdown, the cumulative-kWh series (dashboard race-chart data), and a
+per-zone comfort-violation table (`|PMV| > 0.5` in occupied intervals, matching the threshold
+already used in `mcp_server/providers.py`). Percentage deltas are `None` - never a fabricated
+number - when the baseline value is zero. When `constant` is present, three deltas are computed
+(baseline→constant, constant→agent, baseline→agent) so "the agent's own contribution" is a real
+number, not folded into "everything changed at once".
+
+### Endurance chunks by day because EnergyPlus cannot pause and resume
+
+`experiments/endurance.py` cannot checkpoint a *running* EnergyPlus process - the runtime API
+has no such capability - so resumability is chunk-level: the month is split into
+`--chunk-days`-sized pieces (default 1), each a separate call to `experiments.ab.run_agent_arm`,
+with a JSON checkpoint (`next_chunk_index` + cumulative counters) written atomically
+(temp file + `os.replace`) after every chunk. `--resume` continues from the first *incomplete*
+chunk; a checkpoint that already exists without `--resume` is refused, not silently clobbered.
+
+- **The `PlanCache` is reused across chunks within one process** (cache hit rate keeps
+  accumulating); the `DriftEventDetector` is rebuilt fresh every chunk (it keys severe-error
+  detection off one `.err` file's mtime, which is a new file every chunk - carrying it forward
+  would let a stale count shadow a real error in the new file). A resumed run's cache starts
+  cold - safe, just a few more planner calls than an uninterrupted run.
+- **Exceptions are counted, never swallowed**: a chunk that raises is logged with its full
+  traceback, counted in `cumulative.unhandled_exceptions`, checkpointed *without* advancing
+  past it, and re-raised - the run stops loudly rather than skipping a broken day.
+- Verified (mocked `run_agent_arm`, no EnergyPlus needed for this part): a failure on chunk 3
+  leaves `next_chunk_index` unmoved and `unhandled_exceptions=1`; `--resume` retries that exact
+  chunk (same RunPeriod) and completes; a second run without `--resume` is refused.
 
 ### MCP tool surface: tools are pure, the server is a thin wrapper
 
