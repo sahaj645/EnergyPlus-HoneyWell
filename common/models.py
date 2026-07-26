@@ -360,7 +360,18 @@ class SetpointPlan(_Base):
 
 
 def _offset_minutes(when: datetime, now: datetime) -> int:
-    """Minutes from ``now`` to ``when``, clamped to a single day's worth of offset."""
+    """Minutes from ``now`` to ``when``, clamped to a single day's worth of offset.
+
+    Both are *simulation* time, but ``when`` is whatever an LLM emitted (Pydantic accepts any
+    ISO 8601 it wrote, aware or naive) while ``now`` is always naive sim time from the bus. A
+    live model has been observed to emit a trailing ``Z``/offset even though nothing in the
+    prompt asked for one - strip tzinfo from both before subtracting rather than let that raise,
+    since sim time has no real timezone to reconcile against anyway.
+    """
+    if when.tzinfo is not None:
+        when = when.replace(tzinfo=None)
+    if now.tzinfo is not None:
+        now = now.replace(tzinfo=None)
     delta = (when - now).total_seconds() / 60.0
     return max(0, min(24 * 60, round(delta)))
 
