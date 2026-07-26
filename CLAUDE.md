@@ -113,13 +113,50 @@ media/        demo video
   directory. `common/eplus_path.py` appends `$ENERGYPLUS_DIR` to `sys.path` at import time.
   Import it before anything that touches the runtime API. CI has no EnergyPlus, so nothing
   in the test suite may require it at import time.
-- **Current state: baseline + closed loop + guardian + LLM planner landed.** Implemented:
-  `simulation/{fetch_assets,run_baseline,prepare_idf,idf_io,snapshots,patching,receding}.py`,
-  `agent/{bus,digest,planner,scheduler,prompts}.py`, `common/{store,planslot,generated_enums}.py`,
+- **Current state: baseline + closed loop + guardian + planner + MCP/events/cache landed.**
+  Implemented: `simulation/{fetch_assets,run_baseline,prepare_idf,idf_io,snapshots,patching,
+  receding}.py`, `agent/{bus,digest,planner,scheduler,prompts,events,cache}.py`,
+  `common/{store,planslot,generated_enums}.py`,
   `guardian/{core,executor,watchdog,fallback,supervisor,limits}.py`,
-  `experiments/{kpis,smoke_roundtrip,smoke_llm_loop}.py`. Still `NotImplementedError` stubs by
-  design: `agent/ollama_client.py` (superseded by `agent/planner.py`), `agent/plan_cache.py`,
-  `mcp_server/*`, `dashboard/app.py`, `experiments/{ab_harness,endurance,kpi_extract}.py`.
+  `mcp_server/{server,tools,providers}.py`,
+  `experiments/{kpis,smoke_roundtrip,smoke_llm_loop,mcp_exercise}.py`. Still
+  `NotImplementedError` stubs by design: `agent/ollama_client.py` (superseded by
+  `agent/planner.py`), `agent/plan_cache.py` (superseded by `agent/cache.py`),
+  `dashboard/app.py`, `experiments/{ab_harness,endurance,kpi_extract}.py`.
+
+### MCP tool surface: tools are pure, the server is a thin wrapper
+
+`mcp_server/tools.py` holds the six tools as **pure functions over a `ToolContext`** - no `mcp`
+import, so they are directly callable and testable. `mcp_server/server.py` (FastMCP, stdio,
+lazy `mcp` import) wraps them with LLM-facing docstrings; `mcp_server/providers.py` builds the
+state/forecast/KPI providers the context needs. `ToolContext` is injected once, so the live
+server and the exercise script run identical tool code.
+
+- **`submit_plan` has no bypass (R2).** It lowers the plan and runs it through the *same*
+  `guardian.core.Guardian` the executor uses, returning the verdict - it cannot actuate. The
+  exercise script proves an abusive plan gets the identical clip/rate/strip verdict through the
+  tool as through the guardian directly. `patch_model` is the one model-mutating tool; it uses
+  the Session 3 primitive, which validates-before-accept, so a bad patch never lands (the
+  auto-rollback is "nothing was written").
+- Exit gate: `python -m experiments.mcp_exercise` (every tool once; submit_plan == internal).
+
+### Reactive events + plan cache cut LLM calls hard
+
+`agent/events.py` (`DriftEventDetector`, implements the scheduler's `EventDetector`) fires on
+comfort drift (occupied `|PMV|>0.4` or within 0.3 C of the envelope edge, **2 consecutive
+steps**), **rising** demand into the top 15% of the trailing-7-day peak, an **edge-triggered**
+tariff/carbon band change within the hour, or a new E+ Severe error. All debounced to 10
+sim-minutes. `should_trigger` runs on the callback thread, so its only I/O - the `.err` read -
+is gated on mtime + a once-per-minute clock.
+
+`agent/cache.py` (`PlanCache`) keys the planning situation as `(hour band, occupancy bucket,
+2 C outdoor bin, tariff band, carbon band)`. A hit replays the stored plan with timestamps
+shifted to now - **still lowered and still guardian-filtered by the executor**, zero LLM calls.
+The **hold pre-filter** short-circuits an hourly tick with no event and comfort pressure below
+epsilon straight to "do nothing, no call". Both wired into `Scheduler` (new `cache=` /
+`event_detector=` params, default off so Session 5 behaviour is unchanged); counters
+(`calls_made`/`calls_avoided`/`holds`) are persisted. In a representative day these take the
+planner from one-call-per-cycle down to a handful (~70-85% avoided).
 
 ### Two plan contracts: `Plan` (LLM) and `SetpointPlan` (actuation)
 

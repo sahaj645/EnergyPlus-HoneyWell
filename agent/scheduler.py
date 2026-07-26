@@ -30,9 +30,11 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol, runtime_checkable
 
+from agent.cache import DEFAULT_HOLD_EPSILON, PlanCache
+from agent.events import comfort_pressure
 from agent.planner import Planner
 from common.log import get_logger
-from common.models import BuildingState, TriggerEnum
+from common.models import BuildingState, Plan, TriggerEnum
 from common.planslot import PlanSlot
 from common.store import TelemetryStore
 
@@ -64,11 +66,15 @@ class SchedulerStats:
     failed: int = 0  # planner returned None (unreachable / unrepairable)
     timeouts: int = 0  # preempted for exceeding the wall-clock budget
     discarded: int = 0  # completed but a newer trigger had superseded it
+    cache_hits: int = 0  # cycle satisfied by a cached plan, no LLM call
+    holds: int = 0  # cycle short-circuited by the hold pre-filter, no LLM call
+    events: int = 0  # cycles triggered by an event
 
     def summary(self) -> str:
         return (
             f"triggers={self.triggers} plans_made={self.plans_made} accepted={self.accepted} "
-            f"failed={self.failed} timeouts={self.timeouts} discarded={self.discarded}"
+            f"failed={self.failed} timeouts={self.timeouts} discarded={self.discarded} "
+            f"cache_hits={self.cache_hits} holds={self.holds} events={self.events}"
         )
 
 
@@ -86,6 +92,8 @@ class Scheduler:
         store: TelemetryStore | None = None,
         run_id: str = "",
         event_detector: EventDetector | None = None,
+        cache: PlanCache | None = None,
+        hold_epsilon: float = DEFAULT_HOLD_EPSILON,
     ) -> None:
         self.planner = planner
         self.plan_slot = plan_slot
@@ -95,6 +103,8 @@ class Scheduler:
         self.store = store
         self.run_id = run_id
         self.event_detector = event_detector or NullEventDetector()
+        self.cache = cache
+        self.hold_epsilon = hold_epsilon
 
         self.stats = SchedulerStats()
         self._lock = threading.Lock()
@@ -125,9 +135,15 @@ class Scheduler:
             self.stats.triggers += 1
         self._last_hour = now.replace(minute=0, second=0, microsecond=0)
         self._started = True
+        if trigger is TriggerEnum.EVENT:
+            with self._lock:
+                self.stats.events += 1
 
         worker = threading.Thread(
-            target=self._run_cycle, args=(now, trigger, epoch), name=f"planner-{epoch}", daemon=True
+            target=self._run_cycle,
+            args=(now, trigger, epoch, state),
+            name=f"planner-{epoch}",
+            daemon=True,
         )
         self._worker = worker
         worker.start()
@@ -156,20 +172,18 @@ class Scheduler:
 
     # -- worker thread -----------------------------------------------------------------
 
-    def _run_cycle(self, now: datetime, trigger: TriggerEnum, epoch: int) -> None:
-        """Build digest -> plan -> lower -> commit. Runs off the callback thread."""
+    def _run_cycle(
+        self, now: datetime, trigger: TriggerEnum, epoch: int, state: BuildingState | None
+    ) -> None:
+        """Decide the plan (hold / cache / LLM) -> lower -> commit. Off the callback thread."""
         try:
-            digest = self.digest_provider(now)
-            plan = self.planner.plan(digest, now=now, trigger=trigger)
-
+            plan, from_cache = self._resolve_plan(now, trigger, epoch, state)
             if plan is None:
-                with self._lock:
-                    self.stats.failed += 1
-                log.info("planner returned no plan (trigger=%s)", trigger)
-                return
+                return  # hold, failure, or discard - all already accounted for
 
             with self._lock:
-                self.stats.plans_made += 1
+                if not from_cache:
+                    self.stats.plans_made += 1
                 if epoch != self._epoch:
                     self.stats.discarded += 1
                     log.info("plan from epoch %d discarded; epoch is now %d", epoch, self._epoch)
@@ -199,6 +213,48 @@ class Scheduler:
             with self._lock:
                 if self._inflight_epoch == epoch:
                     self._inflight_epoch = None
+
+    def _resolve_plan(
+        self, now: datetime, trigger: TriggerEnum, epoch: int, state: BuildingState | None
+    ) -> tuple[Plan | None, bool]:
+        """Return ``(plan, from_cache)`` - or ``(None, _)`` for a hold or a planner failure.
+
+        Order: hold pre-filter (deterministic, no call) -> cache lookup (no call) -> the LLM.
+        The cache and the hold both need the observed ``state``; with none, we plan.
+        """
+        if self.cache is not None and state is not None:
+            pressure = comfort_pressure(state)
+            if self.cache.should_hold(
+                is_hourly=trigger is TriggerEnum.HOURLY,
+                event_fired=trigger is TriggerEnum.EVENT,
+                pressure=pressure,
+                epsilon=self.hold_epsilon,
+            ):
+                self.cache.record_hold()
+                with self._lock:
+                    self.stats.holds += 1
+                log.info("hold at %s (pressure=%.2f < eps); no LLM call", now, pressure)
+                return None, False
+
+            key = self.cache.key(now, state)
+            cached = self.cache.lookup(key)
+            if cached is not None:
+                with self._lock:
+                    self.stats.cache_hits += 1
+                log.info("cache hit at %s (%s); reusing plan, no LLM call", now, key.label())
+                return self.cache.reuse(cached, now), True
+
+        digest = self.digest_provider(now)
+        plan = self.planner.plan(digest, now=now, trigger=trigger)
+        if plan is None:
+            with self._lock:
+                self.stats.failed += 1
+            log.info("planner returned no plan (trigger=%s)", trigger)
+            return None, False
+
+        if self.cache is not None and state is not None:
+            self.cache.store(self.cache.key(now, state), plan)
+        return plan, False
 
     # -- shutdown ----------------------------------------------------------------------
 

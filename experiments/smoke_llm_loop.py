@@ -30,7 +30,9 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from agent.bus import SimulationBus
+from agent.cache import PlanCache
 from agent.digest import ForecastRow, build_digest, load_forecast
+from agent.events import DriftEventDetector
 from agent.planner import Planner
 from agent.scheduler import Scheduler
 from common import eplus_path
@@ -77,19 +79,23 @@ class LlmLoopResult:
     timeouts: int
     timesteps: int
     setpoint_moved: bool
+    cache_hits: int = 0
+    holds: int = 0
+    events: int = 0
 
     @property
     def ok(self) -> bool:
         return self.timesteps > 0 and self.accepted >= 1 and self.setpoint_moved
 
     def summary(self) -> str:
-        # The mandated 5-line scoreboard.
+        # The mandated 5-line scoreboard, extended with the cache/event counters this session
+        # adds (cache is no longer "n/a").
         return (
             f"plans made : {self.plans_made}\n"
             f"accepted   : {self.accepted}\n"
             f"clipped    : {self.clipped}\n"
             f"timeouts   : {self.timeouts}\n"
-            f"cache      : n/a"
+            f"cache      : {self.cache_hits} hits, {self.holds} holds, {self.events} events"
         )
 
 
@@ -146,6 +152,18 @@ def run_llm_loop(
     forecast = _forecast_loader(settings)
     plan_slot = PlanSlot()
 
+    # Cache + reactive events (Session 6). The cache classifies tariff/carbon bands; the event
+    # detector reuses those band functions and watches the run's .err file for Severe errors.
+    tariff = load_tariff(settings.data_dir / "tariff.csv")
+    carbon = load_carbon(settings.data_dir / "carbon_intensity.csv")
+    cache = PlanCache(tariff=tariff, carbon=carbon)
+    err_path = settings.simulation_dir / "out_smoke_llm" / "eplusout.err"
+    events = DriftEventDetector(
+        tariff_band_at=cache.tariff_band_at,
+        carbon_band_at=cache.carbon_band_at,
+        err_path=err_path,
+    )
+
     with TelemetryStore(db_path, flush_every_timesteps=12) as store:
         planner = Planner(
             model=settings.ollama_model,
@@ -178,6 +196,8 @@ def run_llm_loop(
             timeout_s=timeout_s,
             store=store,
             run_id=run_id,
+            event_detector=events,
+            cache=cache,
         )
         executor = Executor(
             guardian=CoreGuardian(),
@@ -211,11 +231,13 @@ def run_llm_loop(
         executor.drain_events(store, run_id=run_id)
 
     log.info(
-        "llm loop: exit=%s | scheduler %s | executor %s",
+        "llm loop: exit=%s | scheduler %s | executor %s | cache %s",
         exit_code,
         scheduler.stats.summary(),
         executor.stats.summary(),
+        cache.summary(),
     )
+    cache.save(db_path.with_name("hive_cache_stats.json"))
 
     setpoint_moved = _setpoints_moved(db_path, run_id, model)
     return LlmLoopResult(
@@ -225,6 +247,9 @@ def run_llm_loop(
         timeouts=scheduler.stats.timeouts,
         timesteps=bus.stats.timesteps,
         setpoint_moved=setpoint_moved,
+        cache_hits=scheduler.stats.cache_hits,
+        holds=scheduler.stats.holds,
+        events=scheduler.stats.events,
     )
 
 
