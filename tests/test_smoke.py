@@ -47,6 +47,7 @@ MODULES = [
     "experiments.endurance",
     "experiments.kpi_extract",
     "experiments.kpis",
+    "experiments.journal_demo",
     "experiments.loop_demo",
     "experiments.mcp_exercise",
     "experiments.receding_ab",
