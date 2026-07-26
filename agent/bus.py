@@ -59,6 +59,13 @@ VAR_PMV = "Zone Thermal Comfort Fanger Model PMV"
 VAR_OUTDOOR_TEMP = "Site Outdoor Air Drybulb Temperature"
 SITE_KEY = "Environment"
 FACILITY_METER = "Electricity:Facility"
+#: Some prototype IDFs (observed: the DOE small-office reference building under EnergyPlus
+#: 24.1) never populate a runtime-API handle for the aggregate Facility meter, even though it
+#: reports fine in the SQL output - the live callback and the SQL-based KPI extractor
+#: (`experiments/kpis.py`) go through entirely different EnergyPlus subsystems, so this only
+#: affects the live path. `Electricity:Building` (interior end-uses) is the closest available
+#: substitute for a live facility-power reading when Facility itself has no handle.
+_FACILITY_METER_FALLBACK = "Electricity:Building"
 
 #: Which PlanStep actuators the bus can currently drive, and the ZoneBinding field holding the
 #: Schedule:Constant name for each. Anything else is logged once and skipped rather than
@@ -279,7 +286,15 @@ class SimulationBus:
 
         self._meter_handle = exchange.get_meter_handle(state, FACILITY_METER)
         if self._meter_handle == _BAD_HANDLE:
-            self.stats.missing_handles.append(f"meter[{FACILITY_METER}]")
+            self._meter_handle = exchange.get_meter_handle(state, _FACILITY_METER_FALLBACK)
+            if self._meter_handle == _BAD_HANDLE:
+                self.stats.missing_handles.append(f"meter[{FACILITY_METER}]")
+            else:
+                log.warning(
+                    "meter[%s] unavailable; falling back to meter[%s] for live facility power",
+                    FACILITY_METER,
+                    _FACILITY_METER_FALLBACK,
+                )
 
         for schedule in sorted(self.model.constant_schedules):
             handle = exchange.get_actuator_handle(

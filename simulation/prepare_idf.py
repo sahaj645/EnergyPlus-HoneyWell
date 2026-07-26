@@ -289,8 +289,16 @@ def ensure_outputs(idf, zones: list[str], people_names: list[str]) -> None:
     for variable in SITE_VARIABLES:
         add(SITE_KEY, variable)
 
-    meters = {str(m.Key_Name).upper() for m in idf.idfobjects.get("OUTPUT:METER", [])}
-    if FACILITY_METER.upper() not in meters:
+    # Keyed by (name, frequency): a prototype IDF may already request this meter hourly (for
+    # its own reporting). `experiments.kpis` infers the timestep from each interval's own
+    # length and uses it for peak demand (never hardcoded) - an Hourly-only meter would still
+    # work, just at coarser resolution than the sub-hourly runs this project targets. Coexists
+    # fine with an existing coarser request; does not replace it.
+    meter_keys = {
+        (str(m.Key_Name).upper(), str(m.Reporting_Frequency).upper())
+        for m in idf.idfobjects.get("OUTPUT:METER", [])
+    }
+    if (FACILITY_METER.upper(), "TIMESTEP") not in meter_keys:
         idf.newidfobject(
             "OUTPUT:METER", Key_Name=FACILITY_METER, Reporting_Frequency="Timestep"
         )

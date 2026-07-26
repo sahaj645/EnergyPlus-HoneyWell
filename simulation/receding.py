@@ -397,48 +397,63 @@ class RecedingHorizonDriver:
         return save_idf(idf, out_path)
 
     def _write_schedules(self, idf, chunk: HorizonChunk) -> None:
-        """Replace each controlled Schedule:Constant with a Compact profile for the chunk."""
+        """Replace each controlled Schedule:Constant with a Compact profile for the chunk.
+
+        Deduplicated by schedule **name**, not by zone: several zones can share one schedule
+        (the DOE small-office prototype's whole-building setpoint schedule is exactly this -
+        all five zones reference the same `CLGSETP_SCH`/`HTGSETP_SCH`), and an eppy IDF object
+        is unique by name. Looping per zone and writing a `SCHEDULE:COMPACT` for each one that
+        references a shared schedule produced literal duplicate-named objects - EnergyPlus
+        rejects the model outright ("Duplicate name found... Fatal"). Whichever zone is first
+        in sorted order stands in for the schedule when resolving the plan's steps, the same
+        "one shared value, last write observed wins" reality the live bus already has for a
+        schedule several zones point at - just made deterministic here since object order in a
+        materialised file matters.
+        """
         plan = self._active_plan
         constants = {
             str(s.Name).upper(): s for s in idf.idfobjects.get("SCHEDULE:CONSTANT", [])
         }
 
-        for binding in self.model.zones:
+        schedule_zone: dict[tuple[Actuator, str], str] = {}
+        for binding in sorted(self.model.zones, key=lambda b: b.zone):
             for actuator, attribute in SCHEDULE_ACTUATORS.items():
                 name = getattr(binding, attribute, None)
-                if not name:
-                    continue
-                baseline = self._staged.get(
-                    name, self.model.constant_schedules.get(name, 24.0)
+                if name:
+                    schedule_zone.setdefault((actuator, name), binding.zone)
+
+        for (actuator, name), zone in schedule_zone.items():
+            baseline = self._staged.get(
+                name, self.model.constant_schedules.get(name, 24.0)
+            )
+            if plan is None:
+                points = [(0, baseline)]
+            else:
+                anchor = self._plan_anchor.get(plan.plan_id, chunk.start_datetime)
+                points = breakpoints_for_chunk(
+                    plan,
+                    anchor=anchor,
+                    chunk_start=chunk.start_datetime,
+                    chunk_days=chunk.days,
+                    zone=zone,
+                    actuator=actuator,
+                    baseline=self.model.constant_schedules.get(name, baseline),
                 )
-                if plan is None:
-                    points = [(0, baseline)]
-                else:
-                    anchor = self._plan_anchor.get(plan.plan_id, chunk.start_datetime)
-                    points = breakpoints_for_chunk(
-                        plan,
-                        anchor=anchor,
-                        chunk_start=chunk.start_datetime,
-                        chunk_days=chunk.days,
-                        zone=binding.zone,
-                        actuator=actuator,
-                        baseline=self.model.constant_schedules.get(name, baseline),
-                    )
 
-                existing = constants.get(name.upper())
-                limits = ""
-                if existing is not None:
-                    limits = str(getattr(existing, "Schedule_Type_Limits_Name", "") or "")
-                    idf.removeidfobject(existing)
-                    constants.pop(name.upper(), None)
+            existing = constants.get(name.upper())
+            limits = ""
+            if existing is not None:
+                limits = str(getattr(existing, "Schedule_Type_Limits_Name", "") or "")
+                idf.removeidfobject(existing)
+                constants.pop(name.upper(), None)
 
-                new = idf.newidfobject("SCHEDULE:COMPACT", Name=name)
-                if limits and "Schedule_Type_Limits_Name" in new.fieldnames:
-                    new.Schedule_Type_Limits_Name = limits
-                for index, value in enumerate(compact_fields(points, chunk_days=chunk.days), 1):
-                    field_name = f"Field_{index}"
-                    if field_name in new.fieldnames:
-                        setattr(new, field_name, value)
+            new = idf.newidfobject("SCHEDULE:COMPACT", Name=name)
+            if limits and "Schedule_Type_Limits_Name" in new.fieldnames:
+                new.Schedule_Type_Limits_Name = limits
+            for index, value in enumerate(compact_fields(points, chunk_days=chunk.days), 1):
+                field_name = f"Field_{index}"
+                if field_name in new.fieldnames:
+                    setattr(new, field_name, value)
 
     def _warn_once(self, key: str, message: str, *args) -> None:
         if key in self._warned:
