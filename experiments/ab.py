@@ -269,6 +269,7 @@ def run_agent_arm(
     from agent.cache import PlanCache
     from agent.digest import build_digest, load_forecast
     from agent.events import DriftEventDetector
+    from agent.feedback import FeedbackTracker
     from agent.planner import Planner
     from agent.scheduler import Scheduler
     from guardian.core import Guardian as CoreGuardian
@@ -314,23 +315,26 @@ def run_agent_arm(
             run_id=run_id,
         )
 
+        executor = Executor(
+            guardian=CoreGuardian(), model=model, plan_slot=plan_slot,
+            plan_interval=timedelta(minutes=settings.plan_interval_minutes), run_id=run_id,
+        )
+        feedback = FeedbackTracker()
+
         def digest_provider(now: datetime) -> str:
             state = holder.latest()
             if state is None:
                 return "SIM TIME: (no observation yet)"
+            feedback.observe(executor.events_snapshot())
             return build_digest(
                 state, history=holder.history(), forecast=forecast(now),
-                active_plan=plan_slot.get(), feedback=None,
+                active_plan=plan_slot.get(), feedback=feedback.pending_feedback(),
             )
 
         scheduler = Scheduler(
             planner=planner, plan_slot=plan_slot, digest_provider=digest_provider,
             baseline=baseline_map, timeout_s=timeout_s, store=store, run_id=run_id,
-            event_detector=events, cache=cache,
-        )
-        executor = Executor(
-            guardian=CoreGuardian(), model=model, plan_slot=plan_slot,
-            plan_interval=timedelta(minutes=settings.plan_interval_minutes), run_id=run_id,
+            event_detector=events, cache=cache, feedback=feedback,
         )
         bus = SimulationBus(
             model=model, store=store, run_id=run_id, epw_path=settings.epw_path,

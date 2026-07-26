@@ -220,7 +220,7 @@ def q_journal(db: str, _mtime_key: float, limit: int = 300) -> pd.DataFrame:
     so equality on ``at`` within the same run is the join key.
     """
     return _sql(db, """
-        SELECT p.at, p.plan_id, p.payload,
+        SELECT p.at, p.plan_id, p.payload, p.corrects_plan_id,
                l.id IS NOT NULL AS was_llm_call,
                g.decision AS verdict, g.payload AS guardian_payload
         FROM plans p
@@ -480,7 +480,8 @@ def sec_journal(ctx: Ctx) -> None:
     st.dataframe(frame, width="stretch", height=380, hide_index=True)
     st.caption("🟢 accepted · 🟡 clipped · 🔴 rejected · ⚪ fallback — verdicts from "
                "`guardian_events`; 💾 cache hit vs 🤖 LLM call from the `plans`⋈`llm_calls` "
-               "join.")
+               "join. \"↳ corrects <id>\" (L2) marks a plan generated from the previous "
+               "clipped/rejected plan's guardian reasons - `plans.corrects_plan_id`.")
 
 
 def _journal_row(record: dict) -> dict:
@@ -498,9 +499,13 @@ def _journal_row(record: dict) -> dict:
         guardian_note = json.loads(record.get("guardian_payload") or "{}").get("note", "")
     except (TypeError, json.JSONDecodeError):
         pass
+    corrects = record.get("corrects_plan_id")
+    trigger = plan.get("trigger", "?")
+    if corrects:
+        trigger = f"{trigger} ↳ corrects {corrects[:12]}"
     return {
         "sim time": record["at"],
-        "trigger": plan.get("trigger", "?"),
+        "trigger": trigger,
         "ecms": ", ".join(plan.get("ecms", [])),
         "rationale": rationales or guardian_note,
         "verdict": _VERDICT_BADGE.get(verdict_key, "· pending"),

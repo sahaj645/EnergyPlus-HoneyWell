@@ -61,14 +61,15 @@ CREATE INDEX IF NOT EXISTS ix_telemetry_zone ON telemetry (run_id, zone, sim_tim
 -- Keeping them in one table makes "what did the guardian change?" a self-join rather than a
 -- cross-table reconciliation.
 CREATE TABLE IF NOT EXISTS plans (
-    plan_id       TEXT NOT NULL,
-    stage         TEXT NOT NULL CHECK (stage IN ('proposed', 'approved')),
-    run_id        TEXT,
-    at            TEXT NOT NULL,
-    planner_model TEXT,
-    decision      TEXT,
-    fallback      INTEGER NOT NULL DEFAULT 0,
-    payload       TEXT NOT NULL,
+    plan_id           TEXT NOT NULL,
+    stage             TEXT NOT NULL CHECK (stage IN ('proposed', 'approved')),
+    run_id            TEXT,
+    at                TEXT NOT NULL,
+    planner_model     TEXT,
+    decision          TEXT,
+    fallback          INTEGER NOT NULL DEFAULT 0,
+    payload           TEXT NOT NULL,
+    corrects_plan_id  TEXT,
     PRIMARY KEY (plan_id, stage)
 );
 CREATE INDEX IF NOT EXISTS ix_plans_at ON plans (at);
@@ -155,6 +156,7 @@ _MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("llm_calls", "prompt_tokens", "INTEGER"),
     ("llm_calls", "completion_tokens", "INTEGER"),
     ("llm_calls", "retries", "INTEGER NOT NULL DEFAULT 0"),
+    ("plans", "corrects_plan_id", "TEXT"),
 )
 
 
@@ -304,24 +306,35 @@ class TelemetryStore:
     # Low-frequency (one row per planning cycle, not per timestep), so written straight
     # through. Each plan write flushes telemetry first - see the module docstring.
 
-    def write_plan(self, plan: Plan | SetpointPlan, *, run_id: str | None = None) -> None:
+    def write_plan(
+        self,
+        plan: Plan | SetpointPlan,
+        *,
+        run_id: str | None = None,
+        corrects_plan_id: str | None = None,
+    ) -> None:
         """Journal a proposed plan - the raw LLM ``Plan`` or its lowered ``SetpointPlan``.
 
         Both carry ``plan_id`` / ``created_at`` / ``planner_model`` and serialise via
         ``model_dump_json``; the ``payload`` records whichever shape it was handed.
+        ``corrects_plan_id`` is the L2 self-correction link (Session 9): set when this plan was
+        generated with the previous plan's guardian reasons in its digest, so the journal can
+        render the clipped/rejected -> corrected chain. ``None`` for an ordinary cycle.
         """
         self.flush()
         with self._transaction():
             self._conn.execute(
                 "INSERT OR REPLACE INTO plans "
-                "(plan_id, stage, run_id, at, planner_model, decision, fallback, payload) "
-                "VALUES (?, 'proposed', ?, ?, ?, NULL, 0, ?)",
+                "(plan_id, stage, run_id, at, planner_model, decision, fallback, payload, "
+                " corrects_plan_id) "
+                "VALUES (?, 'proposed', ?, ?, ?, NULL, 0, ?, ?)",
                 (
                     plan.plan_id,
                     run_id,
                     _iso(plan.created_at),
                     plan.planner_model,
                     plan.model_dump_json(),
+                    corrects_plan_id,
                 ),
             )
 

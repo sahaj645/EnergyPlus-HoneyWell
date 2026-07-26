@@ -33,6 +33,7 @@ from agent.bus import SimulationBus
 from agent.cache import PlanCache
 from agent.digest import ForecastRow, build_digest, load_forecast
 from agent.events import DriftEventDetector
+from agent.feedback import FeedbackTracker
 from agent.planner import Planner
 from agent.scheduler import Scheduler
 from common import eplus_path
@@ -176,16 +177,26 @@ def run_llm_loop(
         if not planner.health():
             log.warning("Ollama/model not reachable at %s - plans will fail", settings.ollama_host)
 
+        executor = Executor(
+            guardian=CoreGuardian(),
+            model=model,
+            plan_slot=plan_slot,
+            plan_interval=timedelta(minutes=settings.plan_interval_minutes),
+            run_id=run_id,
+        )
+        feedback = FeedbackTracker()
+
         def digest_provider(now: datetime) -> str:
             state = holder.latest()
             if state is None:
                 return "SIM TIME: (no observation yet)"
+            feedback.observe(executor.events_snapshot())
             return build_digest(
                 state,
                 history=holder.history(),
                 forecast=forecast(now),
                 active_plan=plan_slot.get(),
-                feedback=None,  # Session 9 fills this from the guardian's reasons
+                feedback=feedback.pending_feedback(),  # Session 9: guardian's own reasons
             )
 
         scheduler = Scheduler(
@@ -198,13 +209,7 @@ def run_llm_loop(
             run_id=run_id,
             event_detector=events,
             cache=cache,
-        )
-        executor = Executor(
-            guardian=CoreGuardian(),
-            model=model,
-            plan_slot=plan_slot,
-            plan_interval=timedelta(minutes=settings.plan_interval_minutes),
-            run_id=run_id,
+            feedback=feedback,
         )
         bus = SimulationBus(
             model=model,

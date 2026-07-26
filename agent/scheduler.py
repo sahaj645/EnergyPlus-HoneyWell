@@ -32,6 +32,7 @@ from typing import Protocol, runtime_checkable
 
 from agent.cache import DEFAULT_HOLD_EPSILON, PlanCache
 from agent.events import comfort_pressure
+from agent.feedback import FeedbackTracker
 from agent.planner import Planner
 from common.log import get_logger
 from common.models import BuildingState, Plan, TriggerEnum
@@ -94,6 +95,7 @@ class Scheduler:
         event_detector: EventDetector | None = None,
         cache: PlanCache | None = None,
         hold_epsilon: float = DEFAULT_HOLD_EPSILON,
+        feedback: FeedbackTracker | None = None,
     ) -> None:
         self.planner = planner
         self.plan_slot = plan_slot
@@ -105,6 +107,8 @@ class Scheduler:
         self.event_detector = event_detector or NullEventDetector()
         self.cache = cache
         self.hold_epsilon = hold_epsilon
+        #: L2 self-correction (Session 9). ``None`` leaves Session 5/6/7/8 behaviour unchanged.
+        self.feedback = feedback
 
         self.stats = SchedulerStats()
         self._lock = threading.Lock()
@@ -177,7 +181,7 @@ class Scheduler:
     ) -> None:
         """Decide the plan (hold / cache / LLM) -> lower -> commit. Off the callback thread."""
         try:
-            plan, from_cache = self._resolve_plan(now, trigger, epoch, state)
+            plan, from_cache, corrects_plan_id = self._resolve_plan(now, trigger, epoch, state)
             if plan is None:
                 return  # hold, failure, or discard - all already accounted for
 
@@ -191,7 +195,10 @@ class Scheduler:
 
             setpoints = plan.to_setpoint_plan(now=now, baseline=self.baseline)
             if self.store is not None:
-                self.store.write_plan(plan, run_id=self.run_id)
+                self.store.write_plan(plan, run_id=self.run_id, corrects_plan_id=corrects_plan_id)
+            if corrects_plan_id is not None and self.feedback is not None:
+                # This cycle's plan addressed the pending feedback; do not feed it again.
+                self.feedback.resolve()
             # The plan slot is the guardian-governed boundary: the executor filters every
             # committed plan through the guardian on every timestep (rule R2). Committing here
             # hands the candidate to that authoritative pass, it does not bypass it.
@@ -216,11 +223,15 @@ class Scheduler:
 
     def _resolve_plan(
         self, now: datetime, trigger: TriggerEnum, epoch: int, state: BuildingState | None
-    ) -> tuple[Plan | None, bool]:
-        """Return ``(plan, from_cache)`` - or ``(None, _)`` for a hold or a planner failure.
+    ) -> tuple[Plan | None, bool, str | None]:
+        """Return ``(plan, from_cache, corrects_plan_id)`` - or ``(None, _, _)`` for a hold or a
+        planner failure.
 
         Order: hold pre-filter (deterministic, no call) -> cache lookup (no call) -> the LLM.
         The cache and the hold both need the observed ``state``; with none, we plan.
+
+        ``corrects_plan_id`` (Session 9's L2 loop) is only ever set on the LLM branch: a cached
+        or held cycle never builds a digest, so it never carries feedback to act on.
         """
         if self.cache is not None and state is not None:
             pressure = comfort_pressure(state)
@@ -234,7 +245,7 @@ class Scheduler:
                 with self._lock:
                     self.stats.holds += 1
                 log.info("hold at %s (pressure=%.2f < eps); no LLM call", now, pressure)
-                return None, False
+                return None, False, None
 
             key = self.cache.key(now, state)
             cached = self.cache.lookup(key)
@@ -242,19 +253,23 @@ class Scheduler:
                 with self._lock:
                     self.stats.cache_hits += 1
                 log.info("cache hit at %s (%s); reusing plan, no LLM call", now, key.label())
-                return self.cache.reuse(cached, now), True
+                return self.cache.reuse(cached, now), True, None
 
+        # Building the digest is what pulls in any pending guardian feedback (agent.feedback);
+        # capture which plan it corrects right alongside it, before anything else can move on.
         digest = self.digest_provider(now)
+        corrects_plan_id = self.feedback.pending_plan_id() if self.feedback is not None else None
+
         plan = self.planner.plan(digest, now=now, trigger=trigger)
         if plan is None:
             with self._lock:
                 self.stats.failed += 1
             log.info("planner returned no plan (trigger=%s)", trigger)
-            return None, False
+            return None, False, None
 
         if self.cache is not None and state is not None:
             self.cache.store(self.cache.key(now, state), plan)
-        return plan, False
+        return plan, False, corrects_plan_id
 
     # -- shutdown ----------------------------------------------------------------------
 

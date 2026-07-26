@@ -53,6 +53,8 @@ HOW TO READ THE DIGEST
   (solar), expensive+dirty evening peak.
 - If a PREVIOUS PLAN FEEDBACK section is present, it lists exactly what the guardian changed
   last time. Treat it as ground truth about the safety envelope and do not repeat those moves.
+  This cycle's plan is a correction: for every flagged zone, choose a smaller, compliant action
+  instead of resubmitting the one that was clipped or rejected.
 
 Think about the next few hours, then commit to a small number of deliberate actions.
 """

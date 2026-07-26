@@ -113,17 +113,64 @@ media/        demo video
   directory. `common/eplus_path.py` appends `$ENERGYPLUS_DIR` to `sys.path` at import time.
   Import it before anything that touches the runtime API. CI has no EnergyPlus, so nothing
   in the test suite may require it at import time.
-- **Current state: full pipeline + live dashboard landed.** Implemented:
+- **Current state: full pipeline + live dashboard + self-correction landed.** Implemented:
   `simulation/{fetch_assets,run_baseline,prepare_idf,idf_io,snapshots,patching,receding}.py`,
-  `agent/{bus,digest,planner,scheduler,prompts,events,cache}.py`,
+  `agent/{bus,digest,planner,scheduler,prompts,events,cache,feedback,repair}.py`,
   `common/{store,planslot,generated_enums}.py`,
   `guardian/{core,executor,watchdog,fallback,supervisor,limits}.py`,
   `mcp_server/{server,tools,providers}.py`,
-  `experiments/{kpis,smoke_roundtrip,smoke_llm_loop,mcp_exercise,ab,report,endurance}.py`,
-  `dashboard/{app,export_screens}.py`. Still `NotImplementedError` stubs by design:
-  `agent/ollama_client.py` (superseded by `agent/planner.py`), `agent/plan_cache.py`
+  `experiments/{kpis,smoke_roundtrip,smoke_llm_loop,mcp_exercise,ab,report,endurance,
+  self_heal_demo}.py`, `dashboard/{app,export_screens}.py`. Still `NotImplementedError` stubs by
+  design: `agent/ollama_client.py` (superseded by `agent/planner.py`), `agent/plan_cache.py`
   (superseded by `agent/cache.py`), `experiments/ab_harness.py` (superseded by
   `experiments/ab.py`), `experiments/kpi_extract.py`.
+
+### L2: the guardian's own reasons become next cycle's planning context
+
+`agent/feedback.py` (`FeedbackTracker`) closes the loop Session 5 left open (`agent/digest.py`'s
+empty `PREVIOUS PLAN FEEDBACK` slot). It watches `guardian.executor.Executor.guardian_events` -
+the same in-memory buffer the harness drains to SQLite after the run, read *live* here via a new
+lock-guarded `Executor.events_snapshot()` - and the moment a plan comes back anything but cleanly
+`accepted`, its reasons (`GuardianEvent.note`, already the guardian's stable machine grammar) are
+latched as the next cycle's feedback.
+
+- Wiring lives in the harness, not the scheduler: `experiments/ab.py` and
+  `experiments/smoke_llm_loop.py` both construct the `Executor` *before* `digest_provider`, so the
+  closure can call `feedback.observe(executor.events_snapshot())` right before building the digest
+  that will carry it. `agent/scheduler.py`'s `Scheduler` takes an optional `feedback=` and, on the
+  LLM branch only (never cache/hold - those skip the digest entirely), captures
+  `feedback.pending_plan_id()` alongside the digest and threads it through as the new plan's
+  `corrects_plan_id`, resolving the tracker once that plan is written.
+- **`plans.corrects_plan_id`** (migrated column, like the Session 8 `llm_calls` additions) links a
+  corrected plan back to the one it fixes. The dashboard journal (`dashboard/app.py`) renders it as
+  `"<trigger> ↳ corrects <id>"` - the clipped/rejected → corrected chain, at a glance.
+- The system prompt (`agent/prompts.py`) gained one line making the correction explicit: this
+  cycle's plan is a fix, not a resubmission of what was just clipped.
+
+### L3: self_heal_demo.py exercises the real fault→diagnose→patch→resume loop
+
+`experiments/self_heal_demo.py` is scripted and re-runnable, built from existing primitives, not a
+new subsystem: `plant_fault` removes a zone's cooling schedule via the ordinary
+`simulation.patching.apply_patch` three-verb primitive (syntactically valid, semantically a
+dangling reference); one `experiments.ab.run_bare` call is the receding-horizon chunk; the **real**
+`agent.events.DriftEventDetector` (not a demo-only check) watches that chunk's `eplusout.err` and
+fires `severe_error`; `agent/repair.py` (`RepairPlanner`, structurally `agent/planner.py`'s sibling
+- static system prompt, `PatchSpec.model_json_schema()` as the constrained-decoding grammar, one L1
+repair retry, every call logged) turns the filtered error log into a candidate `PatchSpec`;
+`apply_patch` validates-before-accepting it as a new version; the chunk re-runs, and
+`simulation.patching.rollback` returns the series to a registered-clean v1 if the patch didn't
+parse *or* the error persists - "the loop resumes" either way (healed or safely rolled back), never
+stuck on a broken model.
+
+- Every step is journaled: a plain JSON list (`Journal`, printed and saved as
+  `<out_dir>/journal.json`) plus the one real LLM call, which still goes through
+  `TelemetryStore.write_llm_call` like any other planner call.
+- **`--replay`** skips the LLM entirely: it looks up the newest manifest entry whose applied patch
+  is tagged `repair-<id>` (fault patches are tagged `fault-<id>`, so the two are never ambiguous)
+  under a **persistent** `--versions-dir` (default `experiments/results/self_heal_versions`,
+  distinct from the per-invocation, timestamped `--out`) and reuses that exact `.idf` file - so the
+  demo is deterministic and does not depend on Ollama being up during a live presentation. Labeled
+  `REPLAY` in the journal and in `main`'s printed summary.
 
 ### The dashboard is read-only over WAL - it never opens a write connection
 

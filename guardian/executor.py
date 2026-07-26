@@ -24,6 +24,7 @@ guardian-built object.
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
@@ -101,7 +102,11 @@ class Executor:
 
         self.rate_history = RateHistory.empty()
         self.stats = ExecutorStats()
-        #: Buffered for the harness to persist after the run (rule R1).
+        #: Buffered for the harness to persist after the run (rule R1). Also read live, via
+        #: :meth:`events_snapshot`, by the L2 feedback loop on the planner worker thread - hence
+        #: the lock, even though the callback-side appends stay cheap (list.append under a lock
+        #: it never contends for, since planning cycles are hourly at most).
+        self._events_lock = threading.Lock()
         self.guardian_events: list[GuardianEvent] = []
         #: Buffered verdict stream for printing after the run.
         self.verdict_log: list[VerdictRecord] = []
@@ -145,7 +150,8 @@ class Executor:
         """
         watchdog_event = self.watchdog.check(now)
         if watchdog_event is not None:
-            self.guardian_events.append(watchdog_event)
+            with self._events_lock:
+                self.guardian_events.append(watchdog_event)
             self.stats.watchdog_trips += 1
             log.warning("watchdog tripped at %s; forcing baseline", now)
 
@@ -178,7 +184,8 @@ class Executor:
             self._last_journaled_generation = snapshot.generation
             if approved.decision is not GuardianDecision.REJECTED:
                 self.watchdog.note_valid_plan(now)
-            self.guardian_events.append(self._journal(plan, approved, verdicts, now))
+            with self._events_lock:
+                self.guardian_events.append(self._journal(plan, approved, verdicts, now))
 
         return approved, VerdictRecord(at=now, source="plan", reasons=reasons)
 
@@ -227,16 +234,28 @@ class Executor:
             note=note[:1000],
         )
 
+    # -- live read side (planner worker thread, during the run) ------------------------
+
+    def events_snapshot(self) -> list[GuardianEvent]:
+        """Copy of the guardian events journaled so far - the L2 feedback loop's read side.
+
+        Safe to call from the planner worker while the callback thread keeps appending: it is
+        the same lock the append side takes, so this always sees a consistent, if possibly
+        slightly stale, prefix.
+        """
+        with self._events_lock:
+            return list(self.guardian_events)
+
     # -- persistence (called by the harness AFTER the run - never on the callback) -----
 
     def drain_events(self, store, *, run_id: str | None = None) -> int:
         """Write buffered guardian events to the store. Returns the number written."""
         target_run = run_id or self.run_id or None
-        for event in self.guardian_events:
+        with self._events_lock:
+            pending, self.guardian_events = self.guardian_events, []
+        for event in pending:
             store.write_guardian_event(event, run_id=target_run)
-        written = len(self.guardian_events)
-        self.guardian_events = []
-        return written
+        return len(pending)
 
 
 __all__ = ["EXECUTOR_PLAN_ID", "Executor", "ExecutorStats", "VerdictRecord"]
