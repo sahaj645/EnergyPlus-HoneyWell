@@ -473,6 +473,12 @@ simulation time. `PlanStep.offset_minutes` is measured from the sim time at whic
   carbon-intensity curves shaped for realistic behaviour (midday solar dip, dirty evening
   peak). Fine for optimisation and demos; do not present it as billing data.
 - Acceptance for every commit: `ruff check .` clean, `pytest -q` green.
+- **`reports/architecture.md` is the rubric-mapped design writeup** (system overview, tool-calling,
+  prompt strategy, latency management, log handling, safety/self-correction, results, deployment,
+  verification strategy) - every claim in it cites a file path, and its Results section is
+  explicit about which numbers in this checkout are synthetic (no EnergyPlus/Ollama here) versus
+  what a real `experiments.ab` + `experiments.report` run would produce. `reports/DEMO_SCRIPT.md`
+  is the matching 3-minute shot list with exact commands.
 
 ### The consolidated test suite - properties, contracts, seams, CI, packaging
 
