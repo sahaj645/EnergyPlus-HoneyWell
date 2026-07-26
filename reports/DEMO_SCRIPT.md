@@ -24,11 +24,52 @@ cursor: EnergyPlus → guardian → actuator, and the planner off to the side de
 
 ---
 
-## 0:25 – 1:10 · Self-heal, live — the loop actually working
+## 0:25 – 1:05 · The closed loop in action — EnergyPlus → LLM → model parameter
+
+> **This is the beat that answers the deliverable directly:** live data from EnergyPlus to the
+> LLM, and the LLM's control action updating a model parameter automatically.
 
 **Say:**
-> "Let me show the full agentic loop end to end, live. I'm going to deliberately break the
-> building model, and watch the agent notice, diagnose, and repair it."
+> "Here's one full cycle of the loop, live. A real EnergyPlus simulation runs, and every timestep
+> it hands the agent a sensor snapshot — temperature, occupancy, comfort."
+
+```bash
+python -m experiments.loop_demo --timeout 200
+```
+
+**[on screen]** point at the **§1** lines as they scroll:
+```
+EnergyPlus -> agent  |  07-21 06:13  Core_ZN: 24.1 C, 8 occ, PMV -0.33  |  outdoor 20.8 C
+```
+> "That's live data crossing from EnergyPlus into the agent."
+
+**[on screen]** **§2** — the digest, then the model call:
+> "One of those real states is compressed into this digest and sent to the local LLM. It comes
+> back with a plan — and look at the reasoning: the forecast shows a high-tariff morning peak
+> coming, so it chose to **pre-cool now, while power is cheap.** That's the energy-manager
+> judgement we wanted from the model."
+
+**[on screen]** **§3** — guardian verdict + the written parameter:
+```
+guardian verdict : accepted
+CLGSETP_SCH   24.0 C  ->  24.5 C   [written · drives 5 zone(s)]
+```
+> "The deterministic guardian approves it, and the setpoint is written straight into the model's
+> schedule — the parameter EnergyPlus uses next timestep. Sensor in, plan out, model updated —
+> automatically, no human in the loop."
+
+> **Note for the presenter:** the LLM call takes 25–120s on CPU-only inference (it varies with
+> machine load). Warm the model and close other apps first (see checklist); cut the wait in
+> editing. If you'd rather not wait on camera at all, the self-heal beat below is faster and
+> makes the same point.
+
+---
+
+## 1:05 – 1:35 · Self-heal, live — the loop repairing itself
+
+**Say:**
+> "The same loop also repairs the model when something breaks. I'll deliberately break it and
+> watch the agent notice, diagnose, and fix it."
 
 **[on screen]** run it:
 
