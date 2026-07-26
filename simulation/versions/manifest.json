@@ -1,0 +1,230 @@
+{
+  "base_idf": "D:\\Energyplus_Honewell\\experiments\\results\\self_heal_20260726T223729\\base.idf",
+  "entries": [
+    {
+      "version": 1,
+      "path": "v1_20260726_1707.idf",
+      "content_hash": "29ee04b1e2e18a76",
+      "sim_time": "2026-07-26T17:07:30.704255Z",
+      "trigger": "self_heal_baseline",
+      "plan_id": null,
+      "diff_summary": [
+        "initial: 2 schedule(s)"
+      ],
+      "state": {
+        "sim_time": "2026-07-26T17:07:30.704255Z",
+        "schedule_values": {
+          "CLGSETP_SCH": 24.0,
+          "HTGSETP_SCH": 21.0
+        },
+        "applied_patches": [],
+        "plan_id": null,
+        "trigger": "self_heal_baseline"
+      }
+    },
+    {
+      "version": 2,
+      "path": "v2_patch_fault-454ee7a7.idf",
+      "content_hash": "17c6f21d7fbe4b39",
+      "sim_time": "2026-07-26T17:07:31.016571Z",
+      "trigger": "patch",
+      "plan_id": null,
+      "diff_summary": [
+        "remove SCHEDULE:CONSTANT[CLGSETP_SCH]"
+      ],
+      "state": {
+        "sim_time": "2026-07-26T17:07:31.016571Z",
+        "schedule_values": {
+          "CLGSETP_SCH": 24.0,
+          "HTGSETP_SCH": 21.0
+        },
+        "applied_patches": [
+          "fault-454ee7a7"
+        ],
+        "plan_id": null,
+        "trigger": "patch"
+      }
+    },
+    {
+      "version": 3,
+      "path": "v3_20260726_1708.idf",
+      "content_hash": "29ee04b1e2e18a76",
+      "sim_time": "2026-07-26T17:08:34.123378Z",
+      "trigger": "self_heal_baseline",
+      "plan_id": null,
+      "diff_summary": [
+        "-patch fault-454ee7a7"
+      ],
+      "state": {
+        "sim_time": "2026-07-26T17:08:34.123378Z",
+        "schedule_values": {
+          "CLGSETP_SCH": 24.0,
+          "HTGSETP_SCH": 21.0
+        },
+        "applied_patches": [],
+        "plan_id": null,
+        "trigger": "self_heal_baseline"
+      }
+    },
+    {
+      "version": 4,
+      "path": "v4_patch_fault-dc8d421d.idf",
+      "content_hash": "1e011adad964369d",
+      "sim_time": "2026-07-26T17:08:34.400463Z",
+      "trigger": "patch",
+      "plan_id": null,
+      "diff_summary": [
+        "remove SCHEDULE:CONSTANT[CLGSETP_SCH]"
+      ],
+      "state": {
+        "sim_time": "2026-07-26T17:08:34.400463Z",
+        "schedule_values": {
+          "CLGSETP_SCH": 24.0,
+          "HTGSETP_SCH": 21.0
+        },
+        "applied_patches": [
+          "fault-dc8d421d"
+        ],
+        "plan_id": null,
+        "trigger": "patch"
+      }
+    },
+    {
+      "version": 5,
+      "path": "v5_patch_repair-53d87478f2a0.idf",
+      "content_hash": "1b31c62ad3802d83",
+      "sim_time": "2026-07-26T17:08:49.804356Z",
+      "trigger": "patch",
+      "plan_id": null,
+      "diff_summary": [
+        "add Schedule:Constant[CLGSETP_SCH] (1 fields)"
+      ],
+      "state": {
+        "sim_time": "2026-07-26T17:08:49.804356Z",
+        "schedule_values": {
+          "CLGSETP_SCH": 24.0,
+          "HTGSETP_SCH": 21.0
+        },
+        "applied_patches": [
+          "fault-dc8d421d",
+          "repair-53d87478f2a0"
+        ],
+        "plan_id": null,
+        "trigger": "patch"
+      }
+    },
+    {
+      "version": 6,
+      "path": "v6_20260726_1709.idf",
+      "content_hash": "29ee04b1e2e18a76",
+      "sim_time": "2026-07-26T17:09:02.420266Z",
+      "trigger": "self_heal_baseline",
+      "plan_id": null,
+      "diff_summary": [
+        "-patch fault-dc8d421d",
+        "-patch repair-53d87478f2a0"
+      ],
+      "state": {
+        "sim_time": "2026-07-26T17:09:02.420266Z",
+        "schedule_values": {
+          "CLGSETP_SCH": 24.0,
+          "HTGSETP_SCH": 21.0
+        },
+        "applied_patches": [],
+        "plan_id": null,
+        "trigger": "self_heal_baseline"
+      }
+    },
+    {
+      "version": 7,
+      "path": "v7_patch_fault-6339c028.idf",
+      "content_hash": "1f7792d5b247d5e8",
+      "sim_time": "2026-07-26T17:09:02.718308Z",
+      "trigger": "patch",
+      "plan_id": null,
+      "diff_summary": [
+        "remove SCHEDULE:CONSTANT[CLGSETP_SCH]"
+      ],
+      "state": {
+        "sim_time": "2026-07-26T17:09:02.718308Z",
+        "schedule_values": {
+          "CLGSETP_SCH": 24.0,
+          "HTGSETP_SCH": 21.0
+        },
+        "applied_patches": [
+          "fault-6339c028"
+        ],
+        "plan_id": null,
+        "trigger": "patch"
+      }
+    },
+    {
+      "version": 8,
+      "path": "v8_20260726_1800.idf",
+      "content_hash": "29ee04b1e2e18a76",
+      "sim_time": "2026-07-26T18:00:44.690005Z",
+      "trigger": "self_heal_baseline",
+      "plan_id": null,
+      "diff_summary": [
+        "-patch fault-6339c028"
+      ],
+      "state": {
+        "sim_time": "2026-07-26T18:00:44.690005Z",
+        "schedule_values": {
+          "CLGSETP_SCH": 24.0,
+          "HTGSETP_SCH": 21.0
+        },
+        "applied_patches": [],
+        "plan_id": null,
+        "trigger": "self_heal_baseline"
+      }
+    },
+    {
+      "version": 9,
+      "path": "v9_patch_fault-285de4fb.idf",
+      "content_hash": "d5cd5f7d5fe6a808",
+      "sim_time": "2026-07-26T18:00:45.275340Z",
+      "trigger": "patch",
+      "plan_id": null,
+      "diff_summary": [
+        "remove SCHEDULE:CONSTANT[CLGSETP_SCH]"
+      ],
+      "state": {
+        "sim_time": "2026-07-26T18:00:45.275340Z",
+        "schedule_values": {
+          "CLGSETP_SCH": 24.0,
+          "HTGSETP_SCH": 21.0
+        },
+        "applied_patches": [
+          "fault-285de4fb"
+        ],
+        "plan_id": null,
+        "trigger": "patch"
+      }
+    },
+    {
+      "version": 10,
+      "path": "v10_patch_repair-1ea9b45826a9.idf",
+      "content_hash": "c329d83431214b61",
+      "sim_time": "2026-07-26T18:01:27.291203Z",
+      "trigger": "patch",
+      "plan_id": null,
+      "diff_summary": [
+        "add Schedule:Constant[CLGSETP_SCH] (1 fields)"
+      ],
+      "state": {
+        "sim_time": "2026-07-26T18:01:27.291203Z",
+        "schedule_values": {
+          "CLGSETP_SCH": 24.0,
+          "HTGSETP_SCH": 21.0
+        },
+        "applied_patches": [
+          "fault-285de4fb",
+          "repair-1ea9b45826a9"
+        ],
+        "plan_id": null,
+        "trigger": "patch"
+      }
+    }
+  ]
+}
