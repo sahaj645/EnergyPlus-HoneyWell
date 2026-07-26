@@ -195,6 +195,22 @@ class Guardian:
             value = self._apply_envelope(value, state, reasons, occupied=occupied)
             value = self._apply_pmv(step.actuator, value, state, reasons, occupied=occupied)
             value = self._apply_rate(step.actuator, value, state, history, reasons)
+            # Re-clamp: _apply_pmv/_apply_rate reference the *observed* setpoint and rate
+            # history as their target, and those come from the same untrusted state/history a
+            # hostile plan does - a corrupt sensor reading (or a stale anchor) could otherwise
+            # pull the value back out of the envelope this same function just enforced. The
+            # property this guards ("no reachable plan can exit the comfort envelope") must hold
+            # regardless of what those references happen to be, so it is enforced last, not just
+            # first. A no-op (no new reason logged) whenever the references were sane.
+            value = self._apply_envelope(value, state, reasons, occupied=occupied)
+            if not math.isfinite(value):
+                # Belt-and-suspenders: the guards above should make this unreachable, but a
+                # non-finite value must never reach the actuator regardless of how it got here.
+                return _StepOutcome(
+                    step=None,
+                    reasons=(*reasons, f"reject: {state.zone} {step.actuator} non_finite"),
+                    rejected=True,
+                )
 
         return _StepOutcome(step=step.model_copy(update={"value": value}), reasons=tuple(reasons))
 
@@ -226,10 +242,13 @@ class Guardian:
         room already reads too warm, do not let a setpoint rise (which would add heat or cut
         cooling); when it reads too cold, do not let one fall.
         """
-        if not occupied or state.pmv is None:
+        if not occupied or state.pmv is None or not math.isfinite(state.pmv):
             return value
         current = self._observed_setpoint(actuator, state)
-        if current is None:
+        if current is None or not math.isfinite(current):
+            # A missing or corrupt observed setpoint is not a usable correction target - do not
+            # let it become one (an unguarded NaN/inf anchor would otherwise propagate straight
+            # into the output value).
             return value
 
         env = self.config.envelope
@@ -261,7 +280,10 @@ class Guardian:
 
         last = history.last(state.zone)
         anchor = last.value if last is not None else self._observed_setpoint(actuator, state)
-        if anchor is not None:
+        # A non-finite anchor (corrupt telemetry, or - defensively - a bad history sample) is not
+        # a usable rate-limit reference: `_clamp` against it would happily manufacture a NaN
+        # output, silently defeating the very envelope this pass is supposed to guard.
+        if anchor is not None and math.isfinite(anchor):
             limited = _clamp(value, anchor - rate.max_step_per_timestep_c,
                              anchor + rate.max_step_per_timestep_c)
             if limited != value:
@@ -269,7 +291,7 @@ class Guardian:
                 value = limited
 
         oldest = history.oldest(state.zone)
-        if oldest is not None:
+        if oldest is not None and math.isfinite(oldest.value):
             limited = _clamp(value, oldest.value - rate.max_step_per_hour_c,
                              oldest.value + rate.max_step_per_hour_c)
             if limited != value:

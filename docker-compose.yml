@@ -1,0 +1,46 @@
+# Gateway-appliance deployment: agent (EnergyPlus + guardian + planner) and the read-only
+# Streamlit dashboard, sharing one SQLite file over a named volume - the same WAL-reader
+# relationship `dashboard/app.py` already relies on (see CLAUDE.md, "the dashboard is read-only
+# over WAL"). Ollama is deliberately NOT a service here: it stays on the host (OLLAMA_HOST),
+# since model weights have their own lifecycle and most deployments already run Ollama once for
+# several things, not one per appliance.
+#
+# This is the deployment *story*, not the demo path: the demo runs bare-metal (see
+# deploy/README.md) because it needs the EnergyPlus/Ollama install already on the judge's or
+# presenter's machine, and compose adds a build step that buys nothing for a one-off local run.
+
+services:
+  agent:
+    build:
+      context: .
+      args:
+        EPLUS_DEB_URL: ${EPLUS_DEB_URL:?set to the pinned EnergyPlus .deb release asset}
+        EPLUS_DEB_SHA256: ${EPLUS_DEB_SHA256:?set to that asset's sha256sum}
+    image: hive-agent:latest
+    # `experiments.ab` writes its telemetry SQLite + manifest under experiments/results/, which
+    # is exactly the volume the dashboard also mounts below - no HIVE_DB_PATH override needed,
+    # dashboard/app.py's own DB discovery already globs that directory (and repo_root) for
+    # *.sqlite files.
+    command: ["experiments.ab", "--secondary-baseline", "constant"]
+    environment:
+      OLLAMA_HOST: ${OLLAMA_HOST:-http://host.docker.internal:11434}
+    volumes:
+      - hive-results:/app/experiments/results
+      - hive-simulation:/app/simulation
+    extra_hosts:
+      - "host.docker.internal:host-gateway"  # lets OLLAMA_HOST reach the host on Linux too
+
+  dashboard:
+    image: hive-agent:latest
+    entrypoint: ["streamlit", "run", "dashboard/app.py", "--server.address=0.0.0.0"]
+    volumes:
+      - hive-results:/app/experiments/results:ro
+      - hive-simulation:/app/simulation:ro
+    ports:
+      - "8501:8501"
+    depends_on:
+      - agent
+
+volumes:
+  hive-results:
+  hive-simulation:

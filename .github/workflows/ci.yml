@@ -28,5 +28,13 @@ jobs:
       - name: Lint
         run: ruff check .
 
-      - name: Test
-        run: pytest -q
+      # Capped Hypothesis profile (tests/conftest.py): the adversarial guardian properties run
+      # 25 examples here instead of the 500 a local `dev`-profile run uses, so CI stays fast and
+      # non-flaky. Coverage gate is deliberately scoped to guardian/ + common/ only - the safety
+      # kernel and the shared contracts - not chased anywhere else (rest of the pipeline needs
+      # EnergyPlus/Ollama to exercise meaningfully, which CI does not have).
+      - name: Test (with coverage gate on guardian/ + common/)
+        env:
+          HIVE_HYPOTHESIS_PROFILE: ci
+        run: |
+          pytest -q --cov=guardian --cov=common --cov-report=term-missing --cov-fail-under=80

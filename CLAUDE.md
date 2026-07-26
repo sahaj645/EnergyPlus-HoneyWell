@@ -473,3 +473,51 @@ simulation time. `PlanStep.offset_minutes` is measured from the sim time at whic
   carbon-intensity curves shaped for realistic behaviour (midday solar dip, dirty evening
   peak). Fine for optimisation and demos; do not present it as billing data.
 - Acceptance for every commit: `ruff check .` clean, `pytest -q` green.
+
+### The consolidated test suite - properties, contracts, seams, CI, packaging
+
+- **`tests/test_guardian_properties.py`** - Hypothesis on `guardian.core.Guardian.filter`, the
+  first adversarial coverage that interface has had. Five properties: envelope containment ("no
+  reachable plan can exit the comfort envelope"), rate-limit adherence replayed across cycles,
+  whitelist totality, never-raises on garbage (NaN/inf/huge magnitudes/unknown zones/empty
+  plans), idempotence on an already-safe plan. **Uncovered two real bugs**, both fixed in
+  `guardian/core.py`: `_apply_pmv`/`_apply_rate` used the *observed* setpoint / rate-history
+  anchor as a correction target without checking it was finite - a corrupt sensor reading
+  (NaN cooling setpoint) could propagate straight through the rate clamp into the output value,
+  and a hostile-but-finite observed setpoint could pull a PMV correction outside the
+  already-envelope-clamped range. Fixed with `math.isfinite` guards on every reference value plus
+  a final re-clamp back into the envelope after the PMV/rate passes (belt-and-suspenders: the
+  containment property must hold regardless of *why* a reference value was bad). **This changes
+  guardian behaviour on hostile/corrupt input only** - real telemetry is always finite and
+  in-range, so it should not move the A/B numbers, but the A/B has not been re-run against it
+  (no EnergyPlus in this environment) - do that before trusting `reports/results.json` again.
+  500 examples/property locally (the `dev` Hypothesis profile, default); CI loads the capped
+  `ci` profile (`tests/conftest.py`, 25 examples) via `HIVE_HYPOTHESIS_PROFILE=ci` so an
+  adversarial suite never makes every push slow.
+- **`tests/test_contracts.py`** - `Plan.model_json_schema()` round-trips a schema-legal sample
+  (the exact guarantee `agent/planner.py`'s `format=` argument depends on) and lowers cleanly to
+  `SetpointPlan`; `agent/digest.py` stays within its ~1.5K token budget for the *real* building's
+  full zone count (`ZoneEnum`, not a guessed size) with a full 6-hour forecast and a non-empty
+  feedback section; `common/planslot.py`'s `PlanSlot` survives 8 writer + 4 reader threads
+  hammering `commit`/`get`/`snapshot` concurrently with no torn read and no exception.
+- **`tests/test_seams.py`** - `agent/cache.py`'s discretization boundaries (`hour_band`,
+  `occupancy_bucket`, `outdoor_bin`) at the exact values the docstrings claim; the rate limiter's
+  behaviour across a lost `RateHistory` (a process restart: the observed setpoint becomes the
+  anchor, so the first post-restart cycle is still rate-limited, not a free jump); L2's
+  feedback-injection end to end with a mocked planner (`_FakePlanner`, no Ollama) - cycle 2's
+  digest carries cycle 1's guardian reasons verbatim and cycle 2's plan records the right
+  `corrects_plan_id`. The KPI ₹/CO2 join already had fixture-SQL coverage from Session 2
+  (`tests/test_kpis.py`) - not duplicated here.
+- **CI**: `.github/workflows/ci.yml` now runs `pytest --cov=guardian --cov=common
+  --cov-fail-under=80` (currently ~83%) under the `ci` Hypothesis profile. The gate is scoped to
+  `guardian/` + `common/` on purpose - the safety kernel and the shared contracts - not chased
+  elsewhere, since the rest of the pipeline needs EnergyPlus/Ollama to exercise meaningfully and
+  CI has neither.
+- **Packaging** (`Dockerfile`, `docker-compose.yml`, `deploy/README.md`) - not part of CI. The
+  demo runs bare-metal on purpose (shortest path from command to a live loop for a presentation);
+  compose is the gateway-appliance deployment story: one `agent` container (EnergyPlus + guardian
+  + planner) and one read-only `dashboard` container sharing the `experiments/results/` and
+  `simulation/` volumes, Ollama left on the host via `OLLAMA_HOST` rather than containerized
+  (model weights have their own lifecycle, and one Ollama instance is meant to serve more than
+  one appliance). `EPLUS_DEB_URL`/`EPLUS_DEB_SHA256` build-args are required, not guessed -
+  see `deploy/README.md` for where to get the pinned v24.1.0 asset.
