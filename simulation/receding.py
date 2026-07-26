@@ -500,6 +500,13 @@ def read_chunk_results(sql_path: Path, model: PreparedModel) -> list[BuildingSta
     The live bus gets these from the exchange; here they come out of the SQL afterwards. Same
     :class:`BuildingState` contract either way, which is what keeps the two modes
     interchangeable downstream.
+
+    **Must exclude the two HVAC-sizing design-day environments.** Every EnergyPlus run
+    (``SimulationControl`` requires sizing) reports both design days into the same SQL as the
+    actual RunPeriod chunk; without this filter their rows (a fixed, unrelated Jan/Jul design
+    condition) get mixed into the chunk's observations, corrupting exactly the state the next
+    chunk's plan is built from. Same filter ``experiments.kpis``/``experiments.report`` already
+    apply to their own SQL reads - kept consistent rather than reinvented here.
     """
     import sqlite3
 
@@ -512,6 +519,7 @@ def read_chunk_results(sql_path: Path, model: PreparedModel) -> list[BuildingSta
         VAR_ZONE_AIR_TEMP,
     )
     from common.models import ZoneState
+    from experiments.kpis import _run_period_env_indices
 
     if not Path(sql_path).is_file():
         return []
@@ -529,11 +537,12 @@ def read_chunk_results(sql_path: Path, model: PreparedModel) -> list[BuildingSta
     conn = sqlite3.connect(str(sql_path))
     conn.row_factory = sqlite3.Row
     try:
+        env_indices = _run_period_env_indices(conn)
         rows = conn.execute(
             f"""
             SELECT rdd.Name AS variable, rdd.KeyValue AS key, rd.Value AS value,
                    t.Year AS year, t.Month AS month, t.Day AS day,
-                   t.Hour AS hour, t.Minute AS minute
+                   t.Hour AS hour, t.Minute AS minute, t.EnvironmentPeriodIndex AS env_idx
             FROM ReportData rd
             JOIN ReportDataDictionary rdd
                  ON rd.ReportDataDictionaryIndex = rdd.ReportDataDictionaryIndex
@@ -543,6 +552,8 @@ def read_chunk_results(sql_path: Path, model: PreparedModel) -> list[BuildingSta
             """,
             tuple(wanted),
         ).fetchall()
+        if env_indices is not None:
+            rows = [r for r in rows if r["env_idx"] is None or int(r["env_idx"]) in env_indices]
     finally:
         conn.close()
 

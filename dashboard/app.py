@@ -169,6 +169,32 @@ def _mtime(path: Path | None) -> float:
     return path.stat().st_mtime if path and path.is_file() else 0.0
 
 
+def _short_ts(value: str | None) -> str:
+    """Render an ISO timestamp as a clean 'YYYY-MM-DD HH:MM' for captions, not raw ISO."""
+    if not value:
+        return "—"
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).strftime("%Y-%m-%d %H:%M")
+    except (ValueError, TypeError):
+        return str(value)
+
+
+def _run_label(path_str: str) -> str:
+    """A short, human label for a run artifact instead of its full Windows path.
+
+    ``.../results/ab_20260726T225105/agent/hive.sqlite`` -> ``ab_20260726T225105 · agent``;
+    ``.../results/endurance_demo/checkpoint.json``       -> ``endurance_demo``.
+    """
+    path = Path(path_str)
+    parts = path.parts
+    if "results" in parts:
+        tail = parts[parts.index("results") + 1:]
+        stem = [p for p in tail if not p.endswith((".sqlite", ".json"))]
+        if stem:
+            return " · ".join(stem)
+    return path.stem
+
+
 @st.cache_data(ttl=REFRESH_SECONDS, show_spinner=False)
 def load_results(path_str: str, _mtime_key: float) -> dict | None:
     path = Path(path_str)
@@ -307,7 +333,7 @@ def sec_headline(ctx: Ctx) -> None:
               help="Baseline cost minus agent cost over the identical RunPeriod.")
     c2.metric("kgCO₂ avoided", f"{headline['carbon_avoided_kg']:,.1f}")
     kwh_pct = headline.get("site_kwh_pct")
-    c3.metric("Total site kWh Δ", f"−{kwh_pct:.1f}%" if kwh_pct is not None else "n/a",
+    c3.metric("Total site kWh Δ", f"{kwh_pct:+.1f}%" if kwh_pct is not None else "n/a",
               help=f"{headline['site_kwh_from']:.0f} → {headline['site_kwh_to']:.0f} kWh")
     baseline_pct = _comfort_pct_from_results(ctx.results, "baseline")
     delta = (None if comfort_pct is None or baseline_pct is None
@@ -316,8 +342,8 @@ def sec_headline(ctx: Ctx) -> None:
               f"{comfort_pct:.1f}%" if comfort_pct is not None else "n/a",
               delta=f"{delta:+.1f}% vs baseline" if delta is not None else None,
               delta_color="inverse")
-    st.caption(f"A/B export: `{ctx.results_path}` · run period `{ctx.results.get('spec_label')}`"
-               f" · generated {ctx.results.get('generated_at')}")
+    st.caption(f"Run period **{ctx.results.get('spec_label')}** · "
+               f"generated {_short_ts(ctx.results.get('generated_at'))}")
 
 
 def _comfort_pct_from_results(results: dict, arm: str) -> float | None:
@@ -447,7 +473,8 @@ def sec_comfort(ctx: Ctx) -> None:
     fig.add_hline(y=-0.5, line_dash="dot", line_color=BLUE)
     _style_fig(fig, height=360, yaxis_title="Fanger PMV")
     st.plotly_chart(fig, width="stretch")
-    st.caption(f"Source: `{ctx.db}` (WAL, read-only - safe against a live run).")
+    st.caption("Every occupied point inside the ±0.5 band is a comfortable timestep. "
+               "Read-only over WAL — safe to view while a run is still writing.")
 
 
 # --------------------------------------------------------------------------------------
@@ -597,8 +624,8 @@ def sec_llmops(ctx: Ctx) -> None:
         e3.metric("Planner calls", f"{cumulative.get('planner_calls', 0):,}")
         e4.metric("Guardian fallbacks", f"{cumulative.get('guardian_fallbacks', 0):,}")
         e5.metric("Unhandled exceptions", f"{cumulative.get('unhandled_exceptions', 0)}")
-        st.caption(f"Checkpoint: `{ctx.checkpoint_path}` · updated "
-                   f"{ctx.checkpoint.get('updated_at', '?')}")
+        st.caption(f"Resumable day-chunked endurance run · updated "
+                   f"{_short_ts(ctx.checkpoint.get('updated_at'))}")
 
 
 # --------------------------------------------------------------------------------------
@@ -664,12 +691,12 @@ def main() -> None:
         st.title("🐝 HIVE")
         st.caption("LLM planner · deterministic guardian · EnergyPlus twin")
         dbs = _discover_dbs(settings)
-        db = Path(st.selectbox("Telemetry DB", [str(p) for p in dbs])) if dbs else None
-        results_path = Path(st.text_input(
-            "A/B results export", str(settings.repo_root / "reports" / "results.json")))
+        db = (Path(st.selectbox("Telemetry DB", [str(p) for p in dbs], format_func=_run_label))
+              if dbs else None)
+        results_path = settings.repo_root / "reports" / "results.json"
         checkpoints = _discover_checkpoints(settings)
         checkpoint_path = (Path(st.selectbox("Endurance checkpoint",
-                                             [str(p) for p in checkpoints]))
+                                             [str(p) for p in checkpoints], format_func=_run_label))
                            if checkpoints else None)
         auto = st.toggle(f"Auto-refresh ({REFRESH_SECONDS}s)", value=True)
 
@@ -693,8 +720,8 @@ def main() -> None:
             section(ctx)
             if len(targets) > 1:
                 st.divider()
-        st.caption(f"rendered in {(datetime.now() - started).total_seconds():.2f}s · "
-                   f"live @ {datetime.now():%H:%M:%S} · data is read-only over WAL SQLite")
+        st.caption(f"Rendered in {(datetime.now() - started).total_seconds():.2f}s · "
+                   f"live @ {datetime.now():%H:%M:%S} · read-only over WAL SQLite")
 
     body()
 
