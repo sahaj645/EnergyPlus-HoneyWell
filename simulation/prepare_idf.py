@@ -365,7 +365,7 @@ def render_generated_enums(model: PreparedModel) -> str:
         '"""\n\n'
         "from __future__ import annotations\n\n"
         "from enum import StrEnum\n\n"
-        f'GENERATED_FROM = "{model.idf_path}"\n\n\n'
+        f"GENERATED_FROM = {model.idf_path!r}\n\n\n"
         "class ZoneEnum(StrEnum):\n"
         '    """Conditioned thermal zones. Values match the IDF zone names exactly."""\n\n'
         f"{zones_block}\n\n\n"
