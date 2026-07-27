@@ -9,7 +9,7 @@ manager, wrapped in a deterministic guardian that acts like a controls engineer.
 ![Local LLM](https://img.shields.io/badge/LLM-local%20(Ollama)-orange)
 ![Tests](https://img.shields.io/badge/tests-217%20passing-brightgreen)
 
-📹 **[Demo video](https://drive.google.com/drive/folders/13pnGC2kMCynsEfkNbStX5GDFu0qF-TWK?usp=sharing)** — a 3-minute walkthrough of the loop running live.
+**[Demo video](https://drive.google.com/drive/folders/13pnGC2kMCynsEfkNbStX5GDFu0qF-TWK?usp=sharing)** — a 3-minute walkthrough of the loop running live.
 
 ![HIVE dashboard — cumulative-kWh race chart](reports/screens/2_race_chart.png)
 
@@ -43,12 +43,12 @@ and no API keys.
 
 | | |
 |---|---|
-| 🔁 **Real closed loop** | Live sensor data from an EnergyPlus digital twin → LLM plan → guardian → setpoint written back into the model, every cycle. |
-| 🛡️ **Provably safe, not just tested** | The actuator accepts *only* a guardian-approved plan — no bypass path exists. A Hypothesis property suite proves the invariant *“no reachable plan can exit the comfort envelope”* over thousands of adversarial plans. |
-| 🩹 **Self-healing** | If the model breaks, the agent reads the error log, has the LLM write a repair patch, applies it through a validate-before-accept gate, and rolls back automatically if it didn't work. |
-| 🧰 **Tool-using planner** | The model reasons through an MCP tool surface (`get_state`, `get_forecasts`, `get_kpis`, `submit_plan`, `read_error_log`, `patch_model`). |
-| ⚡ **Cheap to run** | A plan cache + deterministic hold pre-filter avoid ~99% of LLM calls on a representative day; telemetry batches to SQLite (WAL). |
-| 📊 **Fully observable** | A read-only Streamlit dashboard renders the loop live — comfort, the decision journal, and LLMOps — safe to watch while a run is still writing. |
+| **Real closed loop** | Live sensor data from an EnergyPlus digital twin → LLM plan → guardian → setpoint written back into the model, every cycle. |
+| **Provably safe, not just tested** | The actuator accepts *only* a guardian-approved plan — no bypass path exists. A Hypothesis property suite proves the invariant *"no reachable plan can exit the comfort envelope"* over thousands of adversarial plans. |
+| **Self-healing** | If the model breaks, the agent reads the error log, has the LLM write a repair patch, applies it through a validate-before-accept gate, and rolls back automatically if it didn't work. |
+| **Tool-using planner** | The model reasons through an MCP tool surface (`get_state`, `get_forecasts`, `get_kpis`, `submit_plan`, `read_error_log`, `patch_model`). |
+| **Cheap to run** | A plan cache + deterministic hold pre-filter avoid ~99% of LLM calls on a representative day; telemetry batches to SQLite (WAL). |
+| **Fully observable** | A read-only Streamlit dashboard renders the loop live — comfort, the decision journal, and LLMOps — safe to watch while a run is still writing. |
 
 ---
 
