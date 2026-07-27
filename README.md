@@ -9,7 +9,7 @@ manager, wrapped in a deterministic guardian that acts like a controls engineer.
 ![Local LLM](https://img.shields.io/badge/LLM-local%20(Ollama)-orange)
 ![Tests](https://img.shields.io/badge/tests-217%20passing-brightgreen)
 
-**[Demo video](https://drive.google.com/drive/folders/13pnGC2kMCynsEfkNbStX5GDFu0qF-TWK?usp=sharing)** — a 3-minute walkthrough of the loop running live.
+**[Demo video](https://drive.google.com/drive/folders/13pnGC2kMCynsEfkNbStX5GDFu0qF-TWK?usp=sharing)** — a  walkthrough of the loop running live.
 
 ![HIVE dashboard — cumulative-kWh race chart](reports/screens/2_race_chart.png)
 
