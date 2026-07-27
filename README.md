@@ -1,4 +1,5 @@
 # HIVE
+(Demo Video)([https://drive.google.com/drive/folders/13pnGC2kMCynsEfkNbStX5GDFu0qF-TWK?usp=sharing](url))
 
 **HIVE is a closed-loop building-energy control agent.** A local LLM planner watches an
 EnergyPlus digital twin through an MCP tool surface, reasons about weather, time-of-use
